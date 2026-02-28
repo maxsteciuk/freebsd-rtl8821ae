@@ -1,16 +1,70 @@
-# RTL8821AE / RTL8812AE PCIe WiFi Driver for FreeBSD
+# RTL8821AE / RTL8812AE WiFi + Bluetooth Driver for FreeBSD
 
-FreeBSD kernel driver adding PCIe support for Realtek RTL8821AE and RTL8812AE
-802.11ac wireless NICs to the existing `rtwn(4)` driver framework.
+FreeBSD support for Realtek RTL8821AE and RTL8812AE:
+
+- **802.11ac WiFi** — PCIe kernel driver extending the `rtwn(4)` framework
+- **Bluetooth 4.0** — setup automation for the `ng_ubt(4)` / `rtlbtfw` stack
+  (RTL8821AE only; RTL8812AE is WiFi-only)
 
 ## Supported Devices
 
-| Vendor ID | Device ID | Name            |
-|-----------|-----------|-----------------|
-| 0x10ec    | 0x8821    | Realtek RTL8821AE |
-| 0x10ec    | 0x8812    | Realtek RTL8812AE |
+The RTL8821AE is a combo WiFi+Bluetooth chip. WiFi uses a PCIe interface;
+Bluetooth uses an internal USB 1.1 interface. Both can operate simultaneously.
+The RTL8812AE is WiFi-only (2x2 MIMO, no Bluetooth).
+
+### WiFi — PCIe Device IDs
+
+The `rtwn(4)` driver matches on the primary PCI vendor/device ID (subsystem
+IDs are not checked, so all OEM cards with these chips are supported):
+
+| Vendor ID | Device ID | Chipset     | Streams | Bluetooth |
+|-----------|-----------|-------------|---------|-----------|
+| 0x10ec    | 0x8821    | RTL8821AE   | 1x1     | Yes (USB) |
+| 0x10ec    | 0x8812    | RTL8812AE   | 2x2     | No        |
+
+### Known OEM WiFi Modules
+
+These cards have been reported working or are expected to work:
+
+| Subvendor | Subdevice | OEM Module              | Chipset   | Form Factor    |
+|-----------|-----------|-------------------------|-----------|----------------|
+| 0x1a3b    | 0x216c    | AzureWave AW-CB161H     | RTL8821AE | Half Mini PCIe |
+| 0x1a3b    | 0x2161    | AzureWave AW-CB161H     | RTL8821AE | Half Mini PCIe |
+| 0x1043    | 0x85b4    | ASUS                    | RTL8821AE | Half Mini PCIe |
+| 0x1043    | 0x207f    | ASUS                    | RTL8821AE | Half Mini PCIe |
+| 0x1043    | 0x210c    | ASUS                    | RTL8821AE | Half Mini PCIe |
+| 0x17aa    | 0xa814    | Lenovo                  | RTL8821AE | Half Mini PCIe |
+| 0x10ec    | 0x8821    | Realtek reference       | RTL8821AE | —              |
+| 0x1043    | 0x8812    | ASUS PCE-AC56/PCE-AC51  | RTL8812AE | PCIe x1        |
+| 0x2357    | 0x0112    | TP-Link Archer T4E      | RTL8812AE | PCIe x1        |
+| 0x1186    | 0x3318    | D-Link DWA-582          | RTL8812AE | PCIe x1        |
+| 0x10ec    | 0x8812    | Realtek reference       | RTL8812AE | —              |
+
+> **Note:** The driver does not filter on subsystem IDs. Any card with primary
+> PCI ID `10ec:8821` or `10ec:8812` will be recognized.
+
+### Bluetooth — USB Device IDs
+
+The Bluetooth controller on RTL8821AE combo modules appears as a separate USB
+device. FreeBSD's `ng_ubt_rtl(4)` driver handles firmware loading; `ng_ubt(4)`
+provides the Bluetooth HCI transport. The following USB device IDs are
+registered in the FreeBSD kernel for RTL8821AE Bluetooth:
+
+| USB Vendor | USB Product | OEM                    | Notes                  |
+|------------|-------------|------------------------|------------------------|
+| 0x0b05     | 0x17dc      | ASUSTek Computer       | ASUS-branded modules   |
+| 0x13d3     | 0x3414      | IMC Networks/AzureWave |                        |
+| 0x13d3     | 0x3458      | IMC Networks/AzureWave |                        |
+| 0x13d3     | 0x3461      | IMC Networks/AzureWave |                        |
+| 0x13d3     | 0x3462      | IMC Networks/AzureWave | Verified on this repo  |
+
+> **Note:** `ng_ubt_rtl(4)` also has a generic Realtek Bluetooth class match.
+> Realtek BT USB devices not in the table above may still be detected
+> automatically via USB class/subclass/protocol matching.
 
 ## Features
+
+### WiFi (PCIe — `rtwn(4)`)
 
 - 802.11ac (VHT) with 80 MHz channel width
 - 2.4 GHz and 5 GHz dual-band
@@ -20,6 +74,15 @@ FreeBSD kernel driver adding PCIe support for Realtek RTL8821AE and RTL8812AE
 - RX checksum offload (IPv4 + IPv6)
 - Firmware-assisted operation
 - Power management
+
+### Bluetooth 4.0 (USB — `ng_ubt(4)`)
+
+- Bluetooth Core Specification v4.0
+- Dual mode: BR/EDR + Low Energy (BLE)
+- Uses internal USB 1.1 interface (separate from WiFi PCIe)
+- Automatic firmware loading via `devd` + `rtlbtfw`
+- Netgraph-based stack: HCI → L2CAP → Bluetooth sockets
+- Simultaneous WiFi + Bluetooth operation
 
 ## Tested On
 
@@ -46,6 +109,9 @@ sys/
         ├── Makefile                    ← Modified: added rtwnrtl8821ae subdir
         └── rtwnrtl8821ae/
             └── Makefile                ← New: firmware kernel module build
+bluetooth_setup.sh                       ← New: Bluetooth setup automation
+bluetooth_test.sh                        ← New: Bluetooth test suite
+BLUETOOTH.md                             ← New: Bluetooth documentation
 ```
 
 ## Quick Install
@@ -55,8 +121,14 @@ sys/
 git clone https://github.com/maxsteciuk/freebsd-rtl8821ae.git
 cd freebsd-rtl8821ae
 
-# Run the install script (as root)
+# Install WiFi driver only (default, as root)
 sudo sh install.sh
+
+# Install WiFi + Bluetooth
+sudo sh install.sh --all
+
+# Install Bluetooth only
+sudo sh install.sh --bluetooth
 ```
 
 ## Manual Install
@@ -147,6 +219,29 @@ When a new FreeBSD release comes out:
    - **`sys/modules/rtwnfw/Makefile`** — add `rtwnrtl8821ae` to `SUBDIR`
 
 3. Rebuild as described in the Manual Install section above.
+
+## Bluetooth Setup
+
+The RTL8821AE includes a Bluetooth 4.0 controller accessible via an internal
+USB 1.1 interface. FreeBSD's base system already includes the kernel driver
+(`ng_ubt_rtl`) and firmware loader (`rtlbtfw`). You only need to install the
+firmware files and load the modules.
+
+### Quick Bluetooth Setup
+
+```sh
+# Install Bluetooth firmware
+sudo pkg install rtlbt-firmware
+
+# Run the setup script
+sudo sh bluetooth_setup.sh -p
+
+# Verify
+sudo sh bluetooth_test.sh -v
+```
+
+For detailed Bluetooth documentation including architecture, troubleshooting,
+and WiFi+BT coexistence information, see **[BLUETOOTH.md](BLUETOOTH.md)**.
 
 ## Technical Notes
 
