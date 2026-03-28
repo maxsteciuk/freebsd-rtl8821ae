@@ -1,4 +1,6 @@
 .github/
 .claude/
+CLAUDE.md
+.claudeignore
 .copilot/
 .github/copilot-instructions.md
