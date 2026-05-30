@@ -3,7 +3,7 @@
 FreeBSD support for Realtek RTL8821AE and RTL8812AE:
 
 - **802.11ac WiFi** — PCIe kernel driver extending the `rtwn(4)` framework
-- **Bluetooth 4.0** — setup automation for the `ng_ubt(4)` / `rtlbtfw` stack
+- **Bluetooth 4.0** — setup automation for the `ng_ubt(4)` / [rtlbtfw(8)](https://man.freebsd.org/cgi/man.cgi?query=rtlbtfw&sektion=8&manpath=freebsd-current) stack
   (RTL8821AE only; RTL8812AE is WiFi-only)
 
 ## Supported Devices
