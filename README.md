@@ -2,7 +2,7 @@
 
 FreeBSD support for Realtek RTL8821AE and RTL8812AE:
 
-- **802.11ac WiFi** — PCIe kernel driver extending the `rtwn(4)` framework
+- **802.11ac WiFi** — PCIe kernel driver extending the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current) framework
 - **Bluetooth 4.0** — setup automation for the `ng_ubt(4)` / [rtlbtfw(8)](https://man.freebsd.org/cgi/man.cgi?query=rtlbtfw&sektion=8&manpath=freebsd-current) stack
   (RTL8821AE only; RTL8812AE is WiFi-only)
 
@@ -14,7 +14,7 @@ The RTL8812AE is WiFi-only (2x2 MIMO, no Bluetooth).
 
 ### WiFi — PCIe Device IDs
 
-The `rtwn(4)` driver matches on the primary PCI vendor/device ID (subsystem
+The [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current) driver matches on the primary PCI vendor/device ID (subsystem
 IDs are not checked, so all OEM cards with these chips are supported):
 
 | Vendor ID | Device ID | Chipset     | Streams | Bluetooth |
@@ -64,7 +64,7 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 
 ## Features
 
-### WiFi (PCIe — `rtwn(4)`)
+### WiFi (PCIe — [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current))
 
 - 802.11ac (VHT) with 80 MHz channel width
 - 2.4 GHz and 5 GHz dual-band
