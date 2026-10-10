@@ -8,7 +8,8 @@
 #   --all        Install both WiFi driver and Bluetooth support
 #
 # Copies driver sources, firmware, and Makefiles into the FreeBSD source
-# tree, then builds and installs the kernel modules.
+# tree, then builds and installs the kernel modules into /boot/modules and
+# configures /boot/loader.conf to load them from there at boot.
 
 set -e
 
@@ -38,8 +39,28 @@ fi
 SRCDIR="${SRCDIR:-/usr/src}"
 REPODIR="$(cd "$(dirname "$0")" && pwd)"
 
+# The patched modules are installed into /boot/modules.  The stock
+# if_rtwn_pci.ko stays in /boot/kernel, which comes first in
+# kern.module_path, so the patched modules must always be named by path.
+KMODDIR="/boot/modules"
+LOADER_CONF="/boot/loader.conf"
+
 die()  { echo "ERROR: $1" >&2; exit 1; }
 info() { echo "==> $1"; }
+
+# Set $1="$2" in $LOADER_CONF, replacing any existing setting of $1.
+loader_conf_set() {
+	if grep -q "^[[:space:]]*$1=" "$LOADER_CONF" 2>/dev/null; then
+		sed -i '' "s|^[[:space:]]*$1=.*|$1=\"$2\"|" "$LOADER_CONF"
+	else
+		echo "$1=\"$2\"" >> "$LOADER_CONF"
+	fi
+}
+
+# Print the path a loaded kernel module file was loaded from.
+kld_path() {
+	kldstat -v -n "$1" 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p' | head -n 1
+}
 
 # --- Sanity checks ---
 [ "$(id -u)" -eq 0 ] || die "Must run as root (or with sudo)"
@@ -90,15 +111,39 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" clean all
 
 	# --- Install ---
-	info "Installing WiFi kernel modules"
-	make -C "$SRCDIR/sys/modules/rtwn_pci" install
-	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install
+	info "Installing WiFi kernel modules into $KMODDIR"
+	make -C "$SRCDIR/sys/modules/rtwn_pci" install KMODDIR="$KMODDIR"
+	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install KMODDIR="$KMODDIR"
+
+	# --- Boot configuration ---
+	# Without the _name settings the loader picks the stock module.
+	info "Configuring $LOADER_CONF to load the modules from $KMODDIR"
+	if [ -f "$LOADER_CONF" ] && [ ! -f "$LOADER_CONF.pre-rtl8821ae" ]; then
+		cp -p "$LOADER_CONF" "$LOADER_CONF.pre-rtl8821ae"
+	fi
+	loader_conf_set rtwn-rtl8821aefw_load "YES"
+	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
+	loader_conf_set if_rtwn_pci_load "YES"
+	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
 
 	# --- Load ---
-	info "Loading WiFi modules"
+	# Load by path: "kldload if_rtwn_pci" would load the stock module.
+	# A module that is still loaded here could not be unloaded, so the new
+	# one only takes effect at the next boot.  Any other load failure would
+	# also happen at boot, so it stops the install.
+	info "Loading WiFi modules from $KMODDIR"
 	kldunload if_rtwn_pci 2>/dev/null || true
-	kldload rtwn-rtl8821aefw 2>/dev/null || true
-	kldload if_rtwn_pci 2>/dev/null || true
+	kldunload rtwn-rtl8821aefw 2>/dev/null || true
+	for KMOD in rtwn-rtl8821aefw if_rtwn_pci; do
+		if kldstat -q -n "$KMOD"; then
+			echo "WARNING: $KMOD is still loaded from" \
+			    "'$(kld_path "$KMOD")'; reboot to use the new module" >&2
+		else
+			kldload "$KMODDIR/$KMOD.ko" ||
+			    die "cannot load $KMODDIR/$KMOD.ko (see dmesg)"
+			info "$KMOD loaded from $(kld_path "$KMOD")"
+		fi
+	done
 fi
 
 # ============================================================
@@ -119,9 +164,8 @@ echo "Done!"
 
 if [ "$DO_WIFI" -eq 1 ]; then
 	echo ""
-	echo "WiFi: add to /boot/loader.conf:"
-	echo '  rtwn-rtl8821aefw_load="YES"'
-	echo '  if_rtwn_pci_load="YES"'
+	echo "WiFi: $LOADER_CONF now loads the modules from $KMODDIR:"
+	grep -E '^(rtwn-rtl8821aefw|if_rtwn_pci)_' "$LOADER_CONF" | sed 's/^/  /'
 	echo ""
 	echo "WiFi quick test:"
 	echo "  ifconfig wlan0 create wlandev rtwn0"
