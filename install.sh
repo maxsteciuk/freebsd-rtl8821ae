@@ -275,6 +275,9 @@ begin_install() {
 			mv "$MANIFEST" "$MANIFEST.$(date +%Y%m%d-%H%M%S)"
 		fi
 		: > "$MANIFEST"
+		if [ -e "$MODULES_MANIFEST" ]; then
+			mv "$MODULES_MANIFEST" "$MODULES_MANIFEST.$(date +%Y%m%d-%H%M%S)"
+		fi
 		if [ -e "$MODULES_SAVED_DIR" ]; then
 			mv "$MODULES_SAVED_DIR" "$MODULES_SAVED_DIR.$(date +%Y%m%d-%H%M%S)"
 		fi
@@ -283,14 +286,15 @@ begin_install() {
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
 }
 
-# Set entry $2 of checksum list $1 to the checksum of file $3, keeping the
-# other entries.
+# Add the checksum of file $3 to the entries for $2 in checksum list $1.
+# Every checksum ever recorded for a path stays valid, so a file is
+# recognised as this installer's whether or not the rename that follows
+# its recording happened.
 record_entry() {
-	{
-		awk -v k="$2" '$1 != k' "$1" 2>/dev/null || true
-		echo "$2 $(sha256 -q "$3")"
-	} > "$1.new"
-	mv "$1.new" "$1"
+	line="$2 $(sha256 -q "$3")"
+	if ! grep -qxF "$line" "$1" 2>/dev/null; then
+		echo "$line" >> "$1"
+	fi
 }
 
 # Copy source file $1 from the repository into the tree, keeping the
@@ -319,9 +323,16 @@ save_existing_modules() {
 	done
 }
 
-# Record module $1 right after it is installed, likewise.
-record_module() {
-	record_entry "$MODULES_MANIFEST" "$1" "$KMODDIR/$1.ko"
+# Install module $1, built in module directory $2, the same way: stage it
+# beside its destination with the owner and mode make install would use,
+# record it, then rename it into place.  kldxref ignores the staged name,
+# whose last suffix is not .ko, so a leftover can never be loaded.
+install_module() {
+	built="$(make -C "$2" -V .OBJDIR)/$1.ko"
+	mkdir -p "$KMODDIR"
+	install -o root -g wheel -m 444 "$built" "$KMODDIR/$1.ko.rtl8821ae-new"
+	record_entry "$MODULES_MANIFEST" "$1" "$KMODDIR/$1.ko.rtl8821ae-new"
+	mv "$KMODDIR/$1.ko.rtl8821ae-new" "$KMODDIR/$1.ko"
 }
 
 finish_install() {
@@ -336,18 +347,16 @@ configure_loader() {
 	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
 }
 
-# Succeed if source file $1 still holds what the recorded install wrote.
+# Succeed if source file $1 still holds something this installer wrote.
 installed_unchanged() {
-	recorded="$(awk -v f="$1" '$1 == f { print $2 }' "$MANIFEST" 2>/dev/null)"
-	[ -n "$recorded" ] && [ -e "$SRCDIR/$1" ] &&
-	    [ "$(sha256 -q "$SRCDIR/$1")" = "$recorded" ]
+	[ -e "$SRCDIR/$1" ] &&
+	    grep -qxF "$1 $(sha256 -q "$SRCDIR/$1")" "$MANIFEST" 2>/dev/null
 }
 
-# Succeed if module $1 is still the one the recorded install placed.
+# Succeed if module $1 is still one this installer placed.
 module_unchanged() {
-	recorded="$(awk -v k="$1" '$1 == k { print $2 }' "$MODULES_MANIFEST" 2>/dev/null)"
-	[ -n "$recorded" ] && [ -e "$KMODDIR/$1.ko" ] &&
-	    [ "$(sha256 -q "$KMODDIR/$1.ko")" = "$recorded" ]
+	[ -e "$KMODDIR/$1.ko" ] &&
+	    grep -qxF "$1 $(sha256 -q "$KMODDIR/$1.ko")" "$MODULES_MANIFEST" 2>/dev/null
 }
 
 write_build_info() {
@@ -408,6 +417,13 @@ do_check() {
 	status="$(cat "$STATUS" 2>/dev/null || true)"
 	case "$status" in
 	complete)
+		# Without these records --uninstall refuses or cannot restore.
+		for record in "$STATE_DIR/srcdir" "$MANIFEST" "$MODULES_MANIFEST"; do
+			if [ ! -s "$record" ]; then
+				echo "  PROBLEM: $record is missing or empty; rerun install.sh"
+				problems=$((problems + 1))
+			fi
+		done
 		;;
 	pending)
 		echo "  PROBLEM: an install did not complete; rerun install.sh or run --uninstall"
@@ -656,10 +672,9 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	# --- Install ---
 	info "Installing WiFi kernel modules into $KMODDIR"
 	save_existing_modules
-	make -C "$SRCDIR/sys/modules/rtwn_pci" install KMODDIR="$KMODDIR"
-	record_module if_rtwn_pci
-	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install KMODDIR="$KMODDIR"
-	record_module rtwn-rtl8821aefw
+	install_module if_rtwn_pci "$SRCDIR/sys/modules/rtwn_pci"
+	install_module rtwn-rtl8821aefw "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae"
+	kldxref "$KMODDIR"
 	write_build_info
 
 	# --- Boot configuration ---
