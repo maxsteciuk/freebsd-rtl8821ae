@@ -88,6 +88,7 @@ SRC_SAVED_DIR="$STATE_DIR/src-orig"
 MANIFEST="$STATE_DIR/installed-files"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
 MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
+ADDED_SAVED_DIR="$STATE_DIR/added-orig"
 STATUS="$STATE_DIR/status"
 
 # Modules in load order, and the loader.conf settings that select them.
@@ -309,9 +310,11 @@ begin_install() {
 		if [ -e "$MODULES_MANIFEST" ]; then
 			mv "$MODULES_MANIFEST" "$MODULES_MANIFEST.$(date +%Y%m%d-%H%M%S)"
 		fi
-		if [ -e "$MODULES_SAVED_DIR" ]; then
-			mv "$MODULES_SAVED_DIR" "$MODULES_SAVED_DIR.$(date +%Y%m%d-%H%M%S)"
-		fi
+		for dir in "$MODULES_SAVED_DIR" "$ADDED_SAVED_DIR"; do
+			if [ -e "$dir" ]; then
+				mv "$dir" "$dir.$(date +%Y%m%d-%H%M%S)"
+			fi
+		done
 	fi
 	write_state "$STATUS" "pending"
 	write_state "$STATE_DIR/srcdir" "$SRCDIR"
@@ -350,6 +353,19 @@ save_existing_modules() {
 		    [ ! -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
 			mkdir -p "$MODULES_SAVED_DIR"
 			copy_staged "$KMODDIR/$kmod.ko" "$MODULES_SAVED_DIR/$kmod.ko"
+		fi
+	done
+}
+
+# Before the source files are copied, save any added file already in the
+# tree that this installer did not write (from an earlier installer, or
+# edited by hand), so --uninstall can put it back.
+save_existing_added_files() {
+	for f in $ADDED_FILES; do
+		if [ -e "$SRCDIR/$f" ] && ! installed_unchanged "$f" &&
+		    [ ! -e "$ADDED_SAVED_DIR/$f" ]; then
+			mkdir -p "$ADDED_SAVED_DIR/$(dirname "$f")"
+			copy_staged "$SRCDIR/$f" "$ADDED_SAVED_DIR/$f"
 		fi
 	done
 }
@@ -601,14 +617,20 @@ do_uninstall() {
 	else
 		saved="$SRC_SAVED_DIR/$src_ver"
 		info "Restoring the upstream source files in $SRCDIR"
-		for f in $ADDED_FILES; do
-			if installed_unchanged "$f"; then
-				mkdir -p "$aside/src/$(dirname "$f")"
-				mv "$SRCDIR/$f" "$aside/src/$f"
-			elif [ -e "$SRCDIR/$f" ]; then
-				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
+
+		# The replaced files (rtwn_pci_attach.h and the Makefiles) refer
+		# to the added ones, so the added files may only go once every
+		# replaced file is back to its upstream copy; otherwise the tree
+		# would refer to files that are gone and no longer build.
+		all_restorable=1
+		for f in $REPLACED_FILES; do
+			if [ -e "$saved/$f" ] && { installed_unchanged "$f" ||
+			    cmp -s "$saved/$f" "$SRCDIR/$f"; }; then
+				continue
 			fi
+			all_restorable=0
 		done
+
 		for f in $REPLACED_FILES; do
 			if ! installed_unchanged "$f"; then
 				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
@@ -622,6 +644,25 @@ do_uninstall() {
 				warn "no saved upstream copy of $f for source version $src_ver; $SRCDIR/$f still holds the overlay version"
 			fi
 		done
+
+		if [ "$all_restorable" -eq 1 ]; then
+			for f in $ADDED_FILES; do
+				if installed_unchanged "$f"; then
+					mkdir -p "$aside/src/$(dirname "$f")"
+					mv "$SRCDIR/$f" "$aside/src/$f"
+					if [ -e "$ADDED_SAVED_DIR/$f" ]; then
+						copy_staged "$ADDED_SAVED_DIR/$f" "$SRCDIR/$f"
+					fi
+				elif [ -e "$SRCDIR/$f" ]; then
+					warn "$SRCDIR/$f does not hold what this install wrote; left in place"
+				fi
+			done
+		else
+			warn "some replaced files keep the overlay version and refer to the added driver sources, so those stay in $SRCDIR and the tree still builds"
+		fi
+		if [ -e "$ADDED_SAVED_DIR" ]; then
+			mv "$ADDED_SAVED_DIR" "$aside/"
+		fi
 		mv "$MANIFEST" "$aside/"
 	fi
 	for state in "$BUILD_INFO" "$MODULES_MANIFEST" "$STATUS"; do
@@ -684,6 +725,8 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	# If anything below stops the install (a build error, for example),
 	# say what state it left and how to get out of it.
 	trap 'if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then echo "ERROR: the install did not complete; what it changed so far is recorded: rerun install.sh, or undo it with: sh install.sh --uninstall" >&2; fi' EXIT
+
+	save_existing_added_files
 
 	# --- Copy new driver files ---
 	info "Copying driver source files"
