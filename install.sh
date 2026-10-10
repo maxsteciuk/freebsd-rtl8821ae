@@ -102,6 +102,9 @@ BUILD_INFO="$STATE_DIR/build-info"
 BUILD_DIR="$STATE_DIR/build"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
 MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
+# Which earlier modules were saved, with their checksums, kept outside the
+# directory so a lost or damaged saved copy is noticed.
+MODULES_SAVED_LIST="$STATE_DIR/modules-orig.sums"
 STATUS="$STATE_DIR/status"
 # Present when there was no loader.conf to snapshot at install time.
 LOADER_CONF_ABSENT="$STATE_DIR/loader-conf-absent"
@@ -169,21 +172,36 @@ move_aside() {
 # comment, is not part of the value.
 LOADER_WORD='[-[:alnum:]][-[:alnum:]_.]*'
 
-# Set $1="$2" in $LOADER_CONF, replacing any existing setting of $1.
-loader_conf_set() {
-	if grep -q "^[[:space:]]*$1[[:space:]]*=" "$LOADER_CONF" 2>/dev/null; then
-		sed -i '' "s|^[[:space:]]*$1[[:space:]]*=.*|$1=\"$2\"|" "$LOADER_CONF"
+# loader.conf is changed through a copy beside it (same mode) and a single
+# rename: a short write, such as on a full disk, lands in the copy, so the
+# boot configuration holds either all of a change or none of it.  Call
+# loader_conf_begin, then loader_conf_set/unset/append, then
+# loader_conf_commit.
+loader_conf_begin() {
+	LOADER_CONF_NEW="$LOADER_CONF.rtl8821ae-new"
+	if [ -f "$LOADER_CONF" ]; then
+		cp -p "$LOADER_CONF" "$LOADER_CONF_NEW"
 	else
-		echo "$1=\"$2\"" >> "$LOADER_CONF"
+		: > "$LOADER_CONF_NEW"
 	fi
 }
 
-# Remove every setting of $1 from $LOADER_CONF; without the file there is
-# nothing to remove.
-loader_conf_unset() {
-	if [ -f "$LOADER_CONF" ]; then
-		sed -i '' "/^[[:space:]]*$1[[:space:]]*=/d" "$LOADER_CONF"
+loader_conf_commit() {
+	mv "$LOADER_CONF_NEW" "$LOADER_CONF"
+}
+
+# Set $1="$2" in the new loader.conf, replacing any existing setting of $1.
+loader_conf_set() {
+	if grep -q "^[[:space:]]*$1[[:space:]]*=" "$LOADER_CONF_NEW"; then
+		sed -i '' "s|^[[:space:]]*$1[[:space:]]*=.*|$1=\"$2\"|" "$LOADER_CONF_NEW"
+	else
+		echo "$1=\"$2\"" >> "$LOADER_CONF_NEW"
 	fi
+}
+
+# Remove every setting of $1 from the new loader.conf.
+loader_conf_unset() {
+	sed -i '' "/^[[:space:]]*$1[[:space:]]*=/d" "$LOADER_CONF_NEW"
 }
 
 # Print the value of setting $1 in file $2 without quotes, or nothing.
@@ -364,6 +382,7 @@ begin_install() {
 		fi
 		move_aside "$MODULES_MANIFEST"
 		move_aside "$MODULES_SAVED_DIR"
+		move_aside "$MODULES_SAVED_LIST"
 	fi
 	write_state "$STATUS" "pending"
 	write_state "$STATE_DIR/srcdir" "$SRCDIR"
@@ -377,6 +396,31 @@ record_entry() {
 	line="$2 $(sha256 -q "$3")"
 	if ! grep -qxF "$line" "$1" 2>/dev/null; then
 		echo "$line" >> "$1"
+	fi
+}
+
+# Print the modules without a well-formed entry in the record of installed
+# modules; a completed install placed every one of them.
+modules_unrecorded() {
+	for kmod in $KMODS; do
+		if ! grep -q -E "^$kmod [0-9a-f]{64}\$" "$MODULES_MANIFEST" 2>/dev/null; then
+			printf ' %s' "$kmod"
+		fi
+	done
+}
+
+# Print the saved earlier modules that are missing or no longer match
+# their recorded checksum; putting them back would silently fail.  The
+# loop only prints, so it works whether or not the shell runs a
+# redirected loop in a subshell.
+saved_modules_damaged() {
+	if [ -e "$MODULES_SAVED_LIST" ]; then
+		while read -r kmod sum; do
+			if [ ! -r "$MODULES_SAVED_DIR/$kmod.ko" ] ||
+			    [ "$(sha256 -q "$MODULES_SAVED_DIR/$kmod.ko")" != "$sum" ]; then
+				printf ' %s' "$kmod"
+			fi
+		done < "$MODULES_SAVED_LIST"
 	fi
 }
 
@@ -395,6 +439,7 @@ save_existing_modules() {
 		    [ ! -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
 			mkdir -p "$MODULES_SAVED_DIR"
 			copy_staged "$KMODDIR/$kmod.ko" "$MODULES_SAVED_DIR/$kmod.ko"
+			record_entry "$MODULES_SAVED_LIST" "$kmod" "$MODULES_SAVED_DIR/$kmod.ko"
 		fi
 	done
 }
@@ -418,10 +463,12 @@ finish_install() {
 
 # Without the _name settings the loader picks the stock module.
 configure_loader() {
+	loader_conf_begin
 	loader_conf_set rtwn-rtl8821aefw_load "YES"
 	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
 	loader_conf_set if_rtwn_pci_load "YES"
 	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
+	loader_conf_commit
 }
 
 write_build_info() {
@@ -490,6 +537,16 @@ do_check() {
 				problems=$((problems + 1))
 			fi
 		done
+		missing="$(modules_unrecorded)"
+		if [ -n "$missing" ]; then
+			echo "  PROBLEM: the record of installed modules has no entry for$missing; --uninstall would refuse"
+			problems=$((problems + 1))
+		fi
+		bad="$(saved_modules_damaged)"
+		if [ -n "$bad" ]; then
+			echo "  PROBLEM: saved earlier module(s)$bad missing or changed; --uninstall could not put them back"
+			problems=$((problems + 1))
+		fi
 		# Existence only: the snapshot keeps loader.conf's own mode, which
 		# may be root-only; --uninstall checks that it can read it.
 		if [ ! -f "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
@@ -601,8 +658,9 @@ do_uninstall() {
 	status="$(cat "$STATUS" 2>/dev/null || true)"
 	case "$status" in
 	complete)
-		if [ ! -s "$MODULES_MANIFEST" ]; then
-			die "the record of installed modules $MODULES_MANIFEST is missing or empty, so they cannot be told apart from other modules; nothing changed"
+		missing="$(modules_unrecorded)"
+		if [ -n "$missing" ]; then
+			die "the record of installed modules $MODULES_MANIFEST has no entry for$missing, so it cannot be told apart from other modules; nothing changed"
 		fi
 		;;
 	pending)
@@ -611,6 +669,10 @@ do_uninstall() {
 		die "the install status in $STATUS is missing or not one this installer writes ('$status'), so what to undo is unknown; nothing changed"
 		;;
 	esac
+	bad="$(saved_modules_damaged)"
+	if [ -n "$bad" ]; then
+		die "the saved earlier module(s)$bad in $MODULES_SAVED_DIR are missing or changed, so they could not be put back; nothing changed"
+	fi
 	require_root
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
@@ -619,17 +681,19 @@ do_uninstall() {
 	# it, verbatim, so their quoting, spacing and comments come back exactly
 	# as they were; a setting that already matches is left untouched.
 	info "Restoring the module settings in $LOADER_CONF"
+	loader_conf_begin
 	for key in $LOADER_KEYS; do
 		pattern="^[[:space:]]*$key[[:space:]]*="
-		current="$(grep "$pattern" "$LOADER_CONF" 2>/dev/null || true)"
+		current="$(grep "$pattern" "$LOADER_CONF_NEW" || true)"
 		before="$(grep "$pattern" "$LOADER_CONF_SAVED" 2>/dev/null || true)"
 		if [ "$current" != "$before" ]; then
 			loader_conf_unset "$key"
 			if [ -n "$before" ]; then
-				printf '%s\n' "$before" >> "$LOADER_CONF"
+				printf '%s\n' "$before" >> "$LOADER_CONF_NEW"
 			fi
 		fi
 	done
+	loader_conf_commit
 
 	info "Moving the installed modules to $aside"
 	for kmod in $KMODS; do
@@ -651,8 +715,8 @@ do_uninstall() {
 	# Best effort: a failure here must not leave the uninstall half done.
 	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
-	for state in "$MODULES_SAVED_DIR" "$BUILD_DIR" "$BUILD_INFO" \
-	    "$MODULES_MANIFEST" "$LOADER_CONF_ABSENT" "$STATUS"; do
+	for state in "$MODULES_SAVED_DIR" "$MODULES_SAVED_LIST" "$BUILD_DIR" \
+	    "$BUILD_INFO" "$MODULES_MANIFEST" "$LOADER_CONF_ABSENT" "$STATUS"; do
 		if [ -e "$state" ]; then
 			mv "$state" "$aside/"
 		fi
