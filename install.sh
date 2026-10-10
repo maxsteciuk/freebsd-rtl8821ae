@@ -55,7 +55,16 @@ for arg in "$@"; do
 			;;
 		--help|-h)   usage; exit 0 ;;
 		-*)          usage >&2; exit 2 ;;
-		*)           SRCDIR="$arg"; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
+		*)
+			# One source tree: a second path would otherwise silently
+			# replace the first.
+			if [ -z "$arg" ] || [ -n "$SRCDIR" ]; then
+				echo "ERROR: give exactly one source tree path (got '$SRCDIR' and '$arg')" >&2
+				exit 2
+			fi
+			SRCDIR="$arg"
+			INSTALL_ARGS="$INSTALL_ARGS $arg"
+			;;
 	esac
 done
 if [ -n "$MODE_ARG" ] && [ -n "$INSTALL_ARGS" ]; then
@@ -90,6 +99,12 @@ BUILD_DIR="$STATE_DIR/build"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
 MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
 STATUS="$STATE_DIR/status"
+
+# Installs and uninstalls run under an exclusive lock on this file, so two
+# of them cannot interleave their changes to the state, loader.conf and
+# /boot/modules.  The script re-runs itself under lockf(1), which fails at
+# once if another run holds the lock; the variable marks the locked run.
+LOCK_FILE="$STATE_DIR/lock"
 
 # Modules in load order, and the loader.conf settings that select them.
 KMODS="rtwn-rtl8821aefw if_rtwn_pci"
@@ -609,6 +624,13 @@ check)
 	exit $?
 	;;
 uninstall)
+	[ -r "$STATE_DIR/srcdir" ] ||
+	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
+	require_root
+	if [ -z "$RTL8821AE_INSTALL_LOCKED" ]; then
+		export RTL8821AE_INSTALL_LOCKED=1
+		exec lockf -k -t 0 "$LOCK_FILE" /bin/sh "$0" "$@"
+	fi
 	do_uninstall
 	exit 0
 	;;
@@ -631,6 +653,11 @@ if [ "$DO_WIFI" -eq 1 ]; then
 fi
 
 require_root
+if [ -z "$RTL8821AE_INSTALL_LOCKED" ]; then
+	mkdir -p "$STATE_DIR"
+	export RTL8821AE_INSTALL_LOCKED=1
+	exec lockf -k -t 0 "$LOCK_FILE" /bin/sh "$0" "$@"
+fi
 
 info "Installing RTL8821AE/RTL8812AE driver from $SRCDIR"
 
