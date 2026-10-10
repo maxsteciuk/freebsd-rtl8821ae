@@ -53,6 +53,9 @@ if [ "$DO_WIFI" -eq 0 ] && [ "$DO_BT" -eq 0 ]; then
 fi
 
 SRCDIR="${SRCDIR:-/usr/src}"
+# One spelling per tree, so a recorded install is recognised however the
+# path is written (trailing slash, symlink).
+SRCDIR="$(realpath "$SRCDIR" 2>/dev/null || echo "$SRCDIR")"
 REPODIR="$(cd "$(dirname "$0")" && pwd)"
 
 # The patched modules are installed into /boot/modules.  The stock
@@ -110,9 +113,12 @@ loader_conf_set() {
 	fi
 }
 
-# Remove every setting of $1 from $LOADER_CONF.
+# Remove every setting of $1 from $LOADER_CONF; without the file there is
+# nothing to remove.
 loader_conf_unset() {
-	sed -i '' "/^[[:space:]]*$1=/d" "$LOADER_CONF"
+	if [ -f "$LOADER_CONF" ]; then
+		sed -i '' "/^[[:space:]]*$1=/d" "$LOADER_CONF"
+	fi
 }
 
 # Print the value of setting $1 in file $2 without quotes, or nothing.
@@ -256,12 +262,15 @@ begin_install() {
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
 }
 
-# Record the checksums of the installed modules, so --uninstall moves only
-# modules this install placed.
-record_modules() {
-	for kmod in $KMODS; do
-		echo "$kmod $(sha256 -q "$KMODDIR/$kmod.ko")"
-	done > "$MODULES_MANIFEST"
+# Record the checksum of module $1 right after it is installed, keeping
+# the entries of modules not yet replaced, so --uninstall moves every
+# module this install placed, and only those, even if a later step fails.
+record_module() {
+	{
+		awk -v k="$1" '$1 != k' "$MODULES_MANIFEST" 2>/dev/null || true
+		echo "$1 $(sha256 -q "$KMODDIR/$1.ko")"
+	} > "$MODULES_MANIFEST.new"
+	mv "$MODULES_MANIFEST.new" "$MODULES_MANIFEST"
 }
 
 finish_install() {
@@ -577,8 +586,9 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	# --- Install ---
 	info "Installing WiFi kernel modules into $KMODDIR"
 	make -C "$SRCDIR/sys/modules/rtwn_pci" install KMODDIR="$KMODDIR"
+	record_module if_rtwn_pci
 	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install KMODDIR="$KMODDIR"
-	record_modules
+	record_module rtwn-rtl8821aefw
 	write_build_info
 
 	# --- Boot configuration ---
