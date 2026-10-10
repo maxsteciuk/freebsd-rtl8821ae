@@ -123,10 +123,11 @@ kld_path() {
 	kldstat -v -n "$1" 2>/dev/null | sed -n 's/.*(\(.*\)).*/\1/p' | head -n 1
 }
 
-# Print __FreeBSD_version of the source tree.
+# Print __FreeBSD_version of the source tree, or nothing if it cannot be
+# read.  Always succeeds, so callers under set -e reach their own check.
 src_version() {
 	sed -n 's/^#define[[:space:]]*__FreeBSD_version[[:space:]]*\([0-9]*\).*/\1/p' \
-	    "$SRCDIR/sys/sys/param.h" 2>/dev/null
+	    "$SRCDIR/sys/sys/param.h" 2>/dev/null || true
 }
 
 # Print the pciconf -l line of the first supported card.
@@ -200,20 +201,27 @@ check_rtwn_hooks() {
 	fi
 }
 
-# Save the upstream files the install overwrites, once per source version,
-# so --uninstall can put back the copies that match the tree it restores
-# into, even after the source tree was upgraded and reinstalled.  A file
-# that already matches ours was overwritten by an earlier install, so its
-# upstream version is unknown.
+# Save the upstream files the install overwrites, per source version, so
+# --uninstall can put back copies that match the tree it restores into.
+# A file that matches ours still holds an earlier install, so the saved
+# copy (if any) is kept.  Otherwise the file holds upstream content, which
+# may be newer than the saved copy even when __FreeBSD_version did not
+# change (for example a security update), so the saved copy is refreshed
+# and the old one moved aside.
 save_replaced_files() {
 	saved="$SRC_SAVED_DIR/$(src_version)"
 	for f in $REPLACED_FILES; do
-		if [ -e "$saved/$f" ]; then
+		if cmp -s "$REPODIR/$f" "$SRCDIR/$f"; then
+			if [ ! -e "$saved/$f" ]; then
+				warn "$SRCDIR/$f already holds the overlay version; no upstream copy saved"
+			fi
 			continue
 		fi
-		if cmp -s "$REPODIR/$f" "$SRCDIR/$f"; then
-			warn "$SRCDIR/$f already holds the overlay version; no upstream copy saved"
-			continue
+		if [ -e "$saved/$f" ]; then
+			if cmp -s "$saved/$f" "$SRCDIR/$f"; then
+				continue
+			fi
+			mv "$saved/$f" "$saved/$f.superseded-$(date +%Y%m%d-%H%M%S)"
 		fi
 		mkdir -p "$saved/$(dirname "$f")"
 		cp -p "$SRCDIR/$f" "$saved/$f"
@@ -348,6 +356,9 @@ do_uninstall() {
 	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
 	require_root
 	SRCDIR="$(cat "$STATE_DIR/srcdir")"
+	# Read before changing anything, so a missing source tree cannot stop
+	# the uninstall halfway.
+	src_ver="$(src_version)"
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
 
@@ -370,23 +381,27 @@ do_uninstall() {
 
 	# Restore only copies saved from the tree's current source version;
 	# copies from an older version would downgrade the upgraded tree.
-	saved="$SRC_SAVED_DIR/$(src_version)"
-	info "Restoring the upstream source files in $SRCDIR"
-	for f in $ADDED_FILES; do
-		if [ -e "$SRCDIR/$f" ]; then
-			mkdir -p "$aside/src/$(dirname "$f")"
-			mv "$SRCDIR/$f" "$aside/src/$f"
-		fi
-	done
-	for f in $REPLACED_FILES; do
-		if [ -e "$saved/$f" ]; then
-			mkdir -p "$aside/src/$(dirname "$f")"
-			mv "$SRCDIR/$f" "$aside/src/$f"
-			cp -p "$saved/$f" "$SRCDIR/$f"
-		else
-			warn "no saved upstream copy of $f for source version $(src_version); $SRCDIR/$f still holds the overlay version"
-		fi
-	done
+	if [ -z "$src_ver" ]; then
+		warn "cannot read the source version in $SRCDIR; its source files are left as they are"
+	else
+		saved="$SRC_SAVED_DIR/$src_ver"
+		info "Restoring the upstream source files in $SRCDIR"
+		for f in $ADDED_FILES; do
+			if [ -e "$SRCDIR/$f" ]; then
+				mkdir -p "$aside/src/$(dirname "$f")"
+				mv "$SRCDIR/$f" "$aside/src/$f"
+			fi
+		done
+		for f in $REPLACED_FILES; do
+			if [ -e "$saved/$f" ]; then
+				mkdir -p "$aside/src/$(dirname "$f")"
+				mv "$SRCDIR/$f" "$aside/src/$f"
+				cp -p "$saved/$f" "$SRCDIR/$f"
+			else
+				warn "no saved upstream copy of $f for source version $src_ver; $SRCDIR/$f still holds the overlay version"
+			fi
+		done
+	fi
 	if [ -e "$BUILD_INFO" ]; then
 		mv "$BUILD_INFO" "$aside/"
 	fi
