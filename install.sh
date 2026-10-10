@@ -13,10 +13,11 @@
 #
 # Before changing anything, checks that the source tree matches the running
 # kernel and that its rtwn(4) driver interface is one this overlay supports.
-# Then copies driver sources, firmware, and Makefiles into the FreeBSD
-# source tree (saving the upstream files it replaces), builds and installs
-# the kernel modules into /boot/modules, and configures /boot/loader.conf to
-# load them from there at boot.
+# The source tree is never modified: the modules are built from a private
+# view of it in /var/db/rtl8821ae/build, made of links to the source tree
+# with this repository's files in place of the ones it changes.  The
+# modules are then installed into /boot/modules and /boot/loader.conf is
+# configured to load them from there at boot.
 
 set -e
 
@@ -80,31 +81,30 @@ KMODDIR="/boot/modules"
 LOADER_CONF="/boot/loader.conf"
 LOADER_CONF_SAVED="$LOADER_CONF.pre-rtl8821ae"
 
-# Installer state: what the modules were built for, the upstream source
-# files the install replaced, and what --uninstall moved aside.
+# Installer state: the source tree an install was built from, what the
+# modules were built for, the modules it placed and the ones it found in
+# their place, the build view, and what --uninstall moved aside.
 STATE_DIR="/var/db/rtl8821ae"
 BUILD_INFO="$STATE_DIR/build-info"
-SRC_SAVED_DIR="$STATE_DIR/src-orig"
-MANIFEST="$STATE_DIR/installed-files"
+BUILD_DIR="$STATE_DIR/build"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
 MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
-ADDED_SAVED_DIR="$STATE_DIR/added-orig"
 STATUS="$STATE_DIR/status"
 
 # Modules in load order, and the loader.conf settings that select them.
 KMODS="rtwn-rtl8821aefw if_rtwn_pci"
 LOADER_KEYS="rtwn-rtl8821aefw_load rtwn-rtl8821aefw_name if_rtwn_pci_load if_rtwn_pci_name"
 
-# Upstream files the install overwrites, and files it adds; paths are
-# relative to both this repository and the source tree.
-REPLACED_FILES="sys/dev/rtwn/pci/rtwn_pci_attach.h
-sys/modules/rtwn_pci/Makefile
-sys/modules/rtwnfw/Makefile"
-ADDED_FILES="sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c
+# This repository's files: they take the place of the same paths in the
+# build view (three of them replace upstream files, the rest are new).
+OVERLAY_FILES="sys/dev/rtwn/pci/rtwn_pci_attach.h
+sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c
 sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.h
 sys/dev/rtwn/rtl8821a/pci/r21a_pci_compat.c
 sys/dev/rtwn/rtl8821a/pci/r21ae_tx_desc.h
 sys/contrib/dev/rtwn/rtwn-rtl8821aefw.fw.uu
+sys/modules/rtwn_pci/Makefile
+sys/modules/rtwnfw/Makefile
 sys/modules/rtwnfw/rtwnrtl8821ae/Makefile"
 
 # pciconf -l match for the supported cards.
@@ -133,6 +133,13 @@ copy_staged() {
 write_state() {
 	printf '%s\n' "$2" > "$1.new"
 	mv "$1.new" "$1"
+}
+
+# Move $1, if it exists, aside under a name with the current time.
+move_aside() {
+	if [ -e "$1" ]; then
+		mv "$1" "$1.$(date +%Y%m%d-%H%M%S)"
+	fi
 }
 
 # loader.conf lines are read as the loader reads them (stand/lua/config.lua):
@@ -251,45 +258,72 @@ check_rtwn_hooks() {
 	fi
 }
 
-# Save the upstream files the install overwrites, per source version, so
-# --uninstall can put back copies that match the tree it restores into.
-# A file that matches ours still holds an earlier install, so the saved
-# copy (if any) is kept.  Otherwise the file holds upstream content, which
-# may be newer than the saved copy even when __FreeBSD_version did not
-# change (for example a security update), so the saved copy is refreshed
-# and the old one moved aside.
-save_replaced_files() {
-	saved="$SRC_SAVED_DIR/$(src_version)"
-	for f in $REPLACED_FILES; do
-		# Ours: this repository's version, or any version this installer
-		# recorded (an older overlay, before the repository was updated).
-		if cmp -s "$REPODIR/$f" "$SRCDIR/$f" || installed_unchanged "$f"; then
-			if [ ! -e "$saved/$f" ]; then
-				warn "$SRCDIR/$f already holds the overlay version; no upstream copy saved"
+# Make the build view in directory $1: every directory on the way to an
+# overlay file is a real directory, everything else in it is a link to the
+# same entry in the source tree, and the overlay files are copies of this
+# repository's.  The source tree itself is only read.
+make_build_view() {
+	view="$1"
+	dirs="."
+	for f in $OVERLAY_FILES; do
+		d="$(dirname "$f")"
+		while [ "$d" != "." ]; do
+			dirs="$dirs
+$d"
+			d="$(dirname "$d")"
+		done
+	done
+	dirs="$(echo "$dirs" | sort -u)"
+	for d in $dirs; do
+		mkdir -p "$view/$d"
+		if [ ! -d "$SRCDIR/$d" ]; then
+			continue
+		fi
+		for entry in "$SRCDIR/$d"/*; do
+			if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+				continue
 			fi
-			continue
-		fi
-		if [ -e "$saved/$f" ] && cmp -s "$saved/$f" "$SRCDIR/$f"; then
-			continue
-		fi
-		# Stage the new copy before moving the old one aside, so a
-		# failed copy never leaves a partial or missing saved file.
-		mkdir -p "$saved/$(dirname "$f")"
-		cp -p "$SRCDIR/$f" "$saved/$f.rtl8821ae-new"
-		if [ -e "$saved/$f" ]; then
-			mv "$saved/$f" "$saved/$f.superseded-$(date +%Y%m%d-%H%M%S)"
-		fi
-		mv "$saved/$f.rtl8821ae-new" "$saved/$f"
+			rel="${entry#"$SRCDIR"/}"
+			rel="${rel#./}"
+			if echo "$dirs" | grep -qxF "$rel" ||
+			    echo "$OVERLAY_FILES" | grep -qxF "$rel"; then
+				continue
+			fi
+			ln -s "$entry" "$view/$rel"
+		done
+	done
+	for f in $OVERLAY_FILES; do
+		cp "$REPODIR/$f" "$view/$f"
 	done
 }
 
-# Start an install transaction, before the first change.  For a fresh
-# install, snapshot loader.conf (moving an older snapshot aside) and start
-# an empty list of written source files; a reinstall keeps the snapshot
-# and entries of the install already recorded until they are replaced.
-# Record the target tree and that the install is pending.  Source files
-# and modules are recorded as each is written, so a failed install can be
-# undone with --uninstall, which only touches files this install wrote.
+# Run make in the build view.  Three things are given on the command line
+# because the tree's own make files would otherwise look past the view:
+# SRCTOP, which src.sys.env.mk derives from the real path of share/mk (a
+# link back to the source tree), SYSDIR, and __MPATH, the list of *_if.m
+# interface files, which config.mk finds with a find(1) that does not
+# follow the view's links.
+build_make() {
+	MAKEOBJDIRPREFIX="$BUILD_DIR/obj" make \
+	    SRCTOP="$BUILD_DIR/src" SYSDIR="$BUILD_DIR/src/sys" \
+	    __MPATH="$VIEW_MPATH" "$@"
+}
+
+# Set VIEW_MPATH, the interface files of the build view, following its
+# links.
+find_view_interfaces() {
+	VIEW_MPATH="$(find -L "$BUILD_DIR/src/sys/" -name '*_if.m' 2>/dev/null |
+	    sort | tr '\n' ' ' || true)"
+	[ -n "$VIEW_MPATH" ] ||
+	    die "found no *_if.m interface files under $BUILD_DIR/src/sys"
+}
+
+# Start an install transaction, before the first change to the system.
+# For a fresh install, snapshot loader.conf (moving an older snapshot
+# aside) and start new module records; a reinstall keeps the snapshot and
+# records of the install already recorded.  Record the source tree and
+# that the install is pending: --uninstall can then undo a failed install,
+# and only touches modules this installer placed.
 begin_install() {
 	mkdir -p "$STATE_DIR"
 	if [ ! -e "$STATE_DIR/srcdir" ]; then
@@ -297,31 +331,19 @@ begin_install() {
 		if [ -f "$LOADER_CONF" ]; then
 			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED.rtl8821ae-new"
 		fi
-		if [ -e "$LOADER_CONF_SAVED" ]; then
-			mv "$LOADER_CONF_SAVED" "$LOADER_CONF_SAVED.$(date +%Y%m%d-%H%M%S)"
-		fi
+		move_aside "$LOADER_CONF_SAVED"
 		if [ -f "$LOADER_CONF" ]; then
 			mv "$LOADER_CONF_SAVED.rtl8821ae-new" "$LOADER_CONF_SAVED"
 		fi
-		if [ -e "$MANIFEST" ]; then
-			mv "$MANIFEST" "$MANIFEST.$(date +%Y%m%d-%H%M%S)"
-		fi
-		: > "$MANIFEST"
-		if [ -e "$MODULES_MANIFEST" ]; then
-			mv "$MODULES_MANIFEST" "$MODULES_MANIFEST.$(date +%Y%m%d-%H%M%S)"
-		fi
-		for dir in "$MODULES_SAVED_DIR" "$ADDED_SAVED_DIR"; do
-			if [ -e "$dir" ]; then
-				mv "$dir" "$dir.$(date +%Y%m%d-%H%M%S)"
-			fi
-		done
+		move_aside "$MODULES_MANIFEST"
+		move_aside "$MODULES_SAVED_DIR"
 	fi
 	write_state "$STATUS" "pending"
 	write_state "$STATE_DIR/srcdir" "$SRCDIR"
 }
 
 # Add the checksum of file $3 to the entries for $2 in checksum list $1.
-# Every checksum ever recorded for a path stays valid, so a file is
+# Every checksum ever recorded for a name stays valid, so a module is
 # recognised as this installer's whether or not the rename that follows
 # its recording happened.
 record_entry() {
@@ -331,21 +353,14 @@ record_entry() {
 	fi
 }
 
-# Copy source file $1 from the repository into the tree, keeping the
-# entries of files not yet replaced, so --uninstall touches every file this
-# install wrote, and only those, even if a later step fails.  The copy is
-# staged beside the destination and recorded before it is renamed into
-# place, so a file is never changed under its real name before it is
-# recorded.
-install_source_file() {
-	mkdir -p "$SRCDIR/$(dirname "$1")"
-	cp "$REPODIR/$1" "$SRCDIR/$1.rtl8821ae-new"
-	record_entry "$MANIFEST" "$1" "$SRCDIR/$1.rtl8821ae-new"
-	mv "$SRCDIR/$1.rtl8821ae-new" "$SRCDIR/$1"
+# Succeed if module $1 is still one this installer placed.
+module_unchanged() {
+	[ -e "$KMODDIR/$1.ko" ] &&
+	    grep -qxF "$1 $(sha256 -q "$KMODDIR/$1.ko")" "$MODULES_MANIFEST" 2>/dev/null
 }
 
 # Before the modules are installed, save any module file already in their
-# place that this install did not put there (an earlier manual install,
+# place that this installer did not put there (an earlier manual install,
 # for example), so --uninstall can put it back.
 save_existing_modules() {
 	for kmod in $KMODS; do
@@ -357,25 +372,13 @@ save_existing_modules() {
 	done
 }
 
-# Before the source files are copied, save any added file already in the
-# tree that this installer did not write (from an earlier installer, or
-# edited by hand), so --uninstall can put it back.
-save_existing_added_files() {
-	for f in $ADDED_FILES; do
-		if [ -e "$SRCDIR/$f" ] && ! installed_unchanged "$f" &&
-		    [ ! -e "$ADDED_SAVED_DIR/$f" ]; then
-			mkdir -p "$ADDED_SAVED_DIR/$(dirname "$f")"
-			copy_staged "$SRCDIR/$f" "$ADDED_SAVED_DIR/$f"
-		fi
-	done
-}
-
-# Install module $1, built in module directory $2, the same way: stage it
-# beside its destination with the owner and mode make install would use,
-# record it, then rename it into place.  kldxref ignores the staged name,
-# whose last suffix is not .ko, so a leftover can never be loaded.
+# Install module $1, built in view module directory $2: stage it beside
+# its destination with the owner and mode make install would use, record
+# it, then rename it into place, so a module is never replaced under its
+# real name before it is recorded.  kldxref ignores the staged name, whose
+# last suffix is not .ko, so a leftover can never be loaded.
 install_module() {
-	built="$(make -C "$2" -V .OBJDIR)/$1.ko"
+	built="$(build_make -C "$2" -V .OBJDIR)/$1.ko"
 	mkdir -p "$KMODDIR"
 	install -o root -g wheel -m 444 "$built" "$KMODDIR/$1.ko.rtl8821ae-new"
 	record_entry "$MODULES_MANIFEST" "$1" "$KMODDIR/$1.ko.rtl8821ae-new"
@@ -392,18 +395,6 @@ configure_loader() {
 	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
 	loader_conf_set if_rtwn_pci_load "YES"
 	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
-}
-
-# Succeed if source file $1 still holds something this installer wrote.
-installed_unchanged() {
-	[ -e "$SRCDIR/$1" ] &&
-	    grep -qxF "$1 $(sha256 -q "$SRCDIR/$1")" "$MANIFEST" 2>/dev/null
-}
-
-# Succeed if module $1 is still one this installer placed.
-module_unchanged() {
-	[ -e "$KMODDIR/$1.ko" ] &&
-	    grep -qxF "$1 $(sha256 -q "$KMODDIR/$1.ko")" "$MODULES_MANIFEST" 2>/dev/null
 }
 
 write_build_info() {
@@ -466,7 +457,7 @@ do_check() {
 	case "$status" in
 	complete)
 		# Without these records --uninstall refuses or cannot restore.
-		for record in "$STATE_DIR/srcdir" "$MANIFEST" "$MODULES_MANIFEST"; do
+		for record in "$STATE_DIR/srcdir" "$MODULES_MANIFEST"; do
 			if [ ! -s "$record" ]; then
 				echo "  PROBLEM: $record is missing or empty; rerun install.sh"
 				problems=$((problems + 1))
@@ -555,14 +546,10 @@ do_check() {
 
 do_uninstall() {
 	# Only undo an install this script recorded: without the record there
-	# is no telling which settings and files are ours.
+	# is no telling which settings and modules are ours.
 	[ -r "$STATE_DIR/srcdir" ] ||
 	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
 	require_root
-	SRCDIR="$(cat "$STATE_DIR/srcdir")"
-	# Read before changing anything, so a missing source tree cannot stop
-	# the uninstall halfway.
-	src_ver="$(src_version)"
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
 
@@ -599,73 +586,11 @@ do_uninstall() {
 			warn "$KMODDIR/$kmod.ko was not placed by this install or changed since; left in place"
 		fi
 	done
-	if [ -e "$MODULES_SAVED_DIR" ]; then
-		mv "$MODULES_SAVED_DIR" "$aside/"
-	fi
 	# Best effort: a failure here must not leave the uninstall half done.
 	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
-	# Restore only copies saved from the tree's current source version;
-	# copies from an older version would downgrade the upgraded tree.
-	# A file that does not hold what the install wrote was never copied (a
-	# failed install) or was updated or
-	# edited since, so it is left alone.
-	if [ -z "$src_ver" ]; then
-		warn "cannot read the source version in $SRCDIR; its source files are left as they are"
-	elif [ ! -r "$MANIFEST" ]; then
-		warn "no record of the installed source files; $SRCDIR is left as it is"
-	else
-		saved="$SRC_SAVED_DIR/$src_ver"
-		info "Restoring the upstream source files in $SRCDIR"
-
-		# The replaced files (rtwn_pci_attach.h and the Makefiles) refer
-		# to the added ones, so the added files may only go once every
-		# replaced file is back to its upstream copy; otherwise the tree
-		# would refer to files that are gone and no longer build.
-		all_restorable=1
-		for f in $REPLACED_FILES; do
-			if [ -e "$saved/$f" ] && { installed_unchanged "$f" ||
-			    cmp -s "$saved/$f" "$SRCDIR/$f"; }; then
-				continue
-			fi
-			all_restorable=0
-		done
-
-		for f in $REPLACED_FILES; do
-			if ! installed_unchanged "$f"; then
-				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
-			elif [ -e "$saved/$f" ]; then
-				# Same swap as for the modules: a failed copy leaves
-				# the tree as it was for a retry.
-				mkdir -p "$aside/src/$(dirname "$f")"
-				cp -p "$SRCDIR/$f" "$aside/src/$f"
-				copy_staged "$saved/$f" "$SRCDIR/$f"
-			else
-				warn "no saved upstream copy of $f for source version $src_ver; $SRCDIR/$f still holds the overlay version"
-			fi
-		done
-
-		if [ "$all_restorable" -eq 1 ]; then
-			for f in $ADDED_FILES; do
-				if installed_unchanged "$f"; then
-					mkdir -p "$aside/src/$(dirname "$f")"
-					mv "$SRCDIR/$f" "$aside/src/$f"
-					if [ -e "$ADDED_SAVED_DIR/$f" ]; then
-						copy_staged "$ADDED_SAVED_DIR/$f" "$SRCDIR/$f"
-					fi
-				elif [ -e "$SRCDIR/$f" ]; then
-					warn "$SRCDIR/$f does not hold what this install wrote; left in place"
-				fi
-			done
-		else
-			warn "some replaced files keep the overlay version and refer to the added driver sources, so those stay in $SRCDIR and the tree still builds"
-		fi
-		if [ -e "$ADDED_SAVED_DIR" ]; then
-			mv "$ADDED_SAVED_DIR" "$aside/"
-		fi
-		mv "$MANIFEST" "$aside/"
-	fi
-	for state in "$BUILD_INFO" "$MODULES_MANIFEST" "$STATUS"; do
+	for state in "$MODULES_SAVED_DIR" "$BUILD_DIR" "$BUILD_INFO" \
+	    "$MODULES_MANIFEST" "$STATUS"; do
 		if [ -e "$state" ]; then
 			mv "$state" "$aside/"
 		fi
@@ -694,11 +619,11 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	[ -d "$SRCDIR/sys/dev/rtwn" ] || die "FreeBSD source tree not found at $SRCDIR"
 	check_src_version
 	check_rtwn_hooks
-	# One recorded install at a time: installing into a second tree would
-	# lose the record needed to undo the first.
+	# One recorded install at a time: installing from a second tree would
+	# lose the record of which tree the installed modules came from.
 	recorded_srcdir="$(cat "$STATE_DIR/srcdir" 2>/dev/null || true)"
 	if [ -n "$recorded_srcdir" ] && [ "$recorded_srcdir" != "$SRCDIR" ]; then
-		die "an install into $recorded_srcdir is recorded; run --uninstall before installing into $SRCDIR"
+		die "an install from $recorded_srcdir is recorded; run --uninstall before installing from $SRCDIR"
 	fi
 	if [ -z "$(rtwn_card)" ]; then
 		warn "no RTL8821AE/RTL8812AE card found; installing anyway"
@@ -707,7 +632,7 @@ fi
 
 require_root
 
-info "Installing RTL8821AE/RTL8812AE driver into $SRCDIR"
+info "Installing RTL8821AE/RTL8812AE driver from $SRCDIR"
 
 NEED_REBOOT=0
 
@@ -719,53 +644,32 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	info "--- WiFi Driver Installation ---"
 	mkdir -p "$STATE_DIR"
 
-	# --- Save the upstream files about to be overwritten ---
-	save_replaced_files
-	begin_install
-	# If anything below stops the install (a build error, for example),
-	# say what state it left and how to get out of it.
-	trap 'if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then echo "ERROR: the install did not complete; what it changed so far is recorded: rerun install.sh, or undo it with: sh install.sh --uninstall" >&2; fi' EXIT
+	# --- Build, from a private view of the source tree ---
+	info "Preparing the build view in $BUILD_DIR (the source tree is not changed)"
+	move_aside "$BUILD_DIR"
+	make_build_view "$BUILD_DIR/src"
+	find_view_interfaces
 
-	save_existing_added_files
-
-	# --- Copy new driver files ---
-	info "Copying driver source files"
-	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c
-	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.h
-	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_compat.c
-	install_source_file sys/dev/rtwn/rtl8821a/pci/r21ae_tx_desc.h
-
-	# --- Copy modified PCI attach header ---
-	info "Updating rtwn_pci_attach.h (adds RTL8821AE/RTL8812AE device IDs)"
-	install_source_file sys/dev/rtwn/pci/rtwn_pci_attach.h
-
-	# --- Copy firmware ---
-	info "Installing WiFi firmware"
-	install_source_file sys/contrib/dev/rtwn/rtwn-rtl8821aefw.fw.uu
-
-	# --- Copy Makefiles ---
-	info "Updating Makefiles"
-	install_source_file sys/modules/rtwn_pci/Makefile
-	install_source_file sys/modules/rtwnfw/rtwnrtl8821ae/Makefile
-	install_source_file sys/modules/rtwnfw/Makefile
-
-	# --- Build ---
 	info "Building if_rtwn_pci kernel module"
-	make -C "$SRCDIR/sys/modules/rtwn_pci" clean all
+	build_make -C "$BUILD_DIR/src/sys/modules/rtwn_pci" clean all
 
 	info "Building rtwn-rtl8821aefw firmware module"
-	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" clean all
+	build_make -C "$BUILD_DIR/src/sys/modules/rtwnfw/rtwnrtl8821ae" clean all
 
 	# --- Check the build before installing it ---
-	BUILT="$(make -C "$SRCDIR/sys/modules/rtwn_pci" -V .OBJDIR)/if_rtwn_pci.ko"
+	BUILT="$(build_make -C "$BUILD_DIR/src/sys/modules/rtwn_pci" -V .OBJDIR)/if_rtwn_pci.ko"
 	strings "$BUILT" | grep -q 'RTL8821AE' ||
-	    die "$BUILT has no RTL8821AE support; no kernel modules were installed, but the source tree was changed: run 'sh install.sh --uninstall' to undo that"
+	    die "$BUILT has no RTL8821AE support; nothing was installed"
 
 	# --- Install ---
+	begin_install
+	# If anything below stops the install, say what state it left and how
+	# to get out of it.
+	trap 'if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then echo "ERROR: the install did not complete; what it changed so far is recorded: rerun install.sh, or undo it with: sh install.sh --uninstall" >&2; fi' EXIT
 	info "Installing WiFi kernel modules into $KMODDIR"
 	save_existing_modules
-	install_module if_rtwn_pci "$SRCDIR/sys/modules/rtwn_pci"
-	install_module rtwn-rtl8821aefw "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae"
+	install_module if_rtwn_pci "$BUILD_DIR/src/sys/modules/rtwn_pci"
+	install_module rtwn-rtl8821aefw "$BUILD_DIR/src/sys/modules/rtwnfw/rtwnrtl8821ae"
 	kldxref "$KMODDIR"
 	write_build_info
 

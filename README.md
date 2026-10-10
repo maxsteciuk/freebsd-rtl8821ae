@@ -150,8 +150,20 @@ sudo sh install.sh --bluetooth
 The WiFi install puts the patched modules in `/boot/modules` and sets
 `/boot/loader.conf` to load them from there (see step 6 of the manual
 install). The original `loader.conf` is kept as
-`/boot/loader.conf.pre-rtl8821ae`, and the upstream source files it
-overwrites are saved under `/var/db/rtl8821ae`.
+`/boot/loader.conf.pre-rtl8821ae`.
+
+The installer does not modify `/usr/src`. It builds the modules from a
+private view of the source tree in `/var/db/rtl8821ae/build`: links to
+`/usr/src`, with this repository's files in place of the ones it changes.
+
+Earlier versions of `install.sh` copied the driver files into `/usr/src`
+and replaced `sys/dev/rtwn/pci/rtwn_pci_attach.h`,
+`sys/modules/rtwn_pci/Makefile` and `sys/modules/rtwnfw/Makefile` there.
+This version leaves such a tree as it is. To return it to upstream,
+restore those three files from your source checkout (git or
+freebsd-update) and remove `sys/dev/rtwn/rtl8821a/pci/`,
+`sys/contrib/dev/rtwn/rtwn-rtl8821aefw.fw.uu` and
+`sys/modules/rtwnfw/rtwnrtl8821ae/`.
 
 If a wlan interface on the card is already up, the installer does not
 reload the driver, because that would drop the link (and cut off an ssh
@@ -172,6 +184,9 @@ Run `install.sh` again after every FreeBSD upgrade: the modules are built
 for one kernel version, and `--check` reports when the kernel has changed.
 
 ## Manual Install
+
+These steps build the driver inside the source tree itself, which changes
+`/usr/src`. `install.sh` builds the same modules without changing it.
 
 ### 1. Copy driver source files
 
