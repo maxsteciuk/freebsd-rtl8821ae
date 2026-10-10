@@ -68,6 +68,8 @@ STATE_DIR="/var/db/rtl8821ae"
 BUILD_INFO="$STATE_DIR/build-info"
 SRC_SAVED_DIR="$STATE_DIR/src-orig"
 MANIFEST="$STATE_DIR/installed-files"
+MODULES_MANIFEST="$STATE_DIR/installed-modules"
+STATUS="$STATE_DIR/status"
 
 # Modules in load order, and the loader.conf settings that select them.
 KMODS="rtwn-rtl8821aefw if_rtwn_pci"
@@ -231,15 +233,47 @@ save_replaced_files() {
 	done
 }
 
-# Record a completed install: the checksum of every source file it placed
-# and, last, the source tree it went into, which marks the install as
-# complete.  --uninstall only undoes a recorded install and only touches
-# files that still hold what the install wrote.
-write_install_record() {
+# Start an install transaction, before the first change.  Snapshot
+# loader.conf, unless an install is already recorded (its snapshot holds
+# the state from before it), moving an older snapshot aside.  Record the
+# checksums of the source files about to be copied, the target tree, and
+# that the install is pending.  A failed install can then be undone with
+# --uninstall, which only touches files that hold what this install wrote.
+begin_install() {
+	mkdir -p "$STATE_DIR"
+	if [ ! -e "$STATE_DIR/srcdir" ]; then
+		if [ -e "$LOADER_CONF_SAVED" ]; then
+			mv "$LOADER_CONF_SAVED" "$LOADER_CONF_SAVED.$(date +%Y%m%d-%H%M%S)"
+		fi
+		if [ -f "$LOADER_CONF" ]; then
+			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED"
+		fi
+	fi
 	for f in $REPLACED_FILES $ADDED_FILES; do
-		echo "$f $(sha256 -q "$SRCDIR/$f")"
+		echo "$f $(sha256 -q "$REPODIR/$f")"
 	done > "$MANIFEST"
+	echo "pending" > "$STATUS"
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
+}
+
+# Record the checksums of the installed modules, so --uninstall moves only
+# modules this install placed.
+record_modules() {
+	for kmod in $KMODS; do
+		echo "$kmod $(sha256 -q "$KMODDIR/$kmod.ko")"
+	done > "$MODULES_MANIFEST"
+}
+
+finish_install() {
+	echo "complete" > "$STATUS"
+}
+
+# Without the _name settings the loader picks the stock module.
+configure_loader() {
+	loader_conf_set rtwn-rtl8821aefw_load "YES"
+	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
+	loader_conf_set if_rtwn_pci_load "YES"
+	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
 }
 
 # Succeed if source file $1 still holds what the recorded install wrote.
@@ -247,6 +281,13 @@ installed_unchanged() {
 	recorded="$(awk -v f="$1" '$1 == f { print $2 }' "$MANIFEST" 2>/dev/null)"
 	[ -n "$recorded" ] && [ -e "$SRCDIR/$1" ] &&
 	    [ "$(sha256 -q "$SRCDIR/$1")" = "$recorded" ]
+}
+
+# Succeed if module $1 is still the one the recorded install placed.
+module_unchanged() {
+	recorded="$(awk -v k="$1" '$1 == k { print $2 }' "$MODULES_MANIFEST" 2>/dev/null)"
+	[ -n "$recorded" ] && [ -e "$KMODDIR/$1.ko" ] &&
+	    [ "$(sha256 -q "$KMODDIR/$1.ko")" = "$recorded" ]
 }
 
 write_build_info() {
@@ -302,6 +343,10 @@ do_check() {
 	else
 		echo "  modules built for: unknown (no $BUILD_INFO)"
 		echo "  PROBLEM: cannot tell whether the modules match the kernel; rerun install.sh"
+		problems=$((problems + 1))
+	fi
+	if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then
+		echo "  PROBLEM: an install did not complete; rerun install.sh or run --uninstall"
 		problems=$((problems + 1))
 	fi
 
@@ -393,15 +438,18 @@ do_uninstall() {
 
 	info "Moving the installed modules to $aside"
 	for kmod in $KMODS; do
-		if [ -e "$KMODDIR/$kmod.ko" ]; then
+		if module_unchanged "$kmod"; then
 			mv "$KMODDIR/$kmod.ko" "$aside/"
+		elif [ -e "$KMODDIR/$kmod.ko" ]; then
+			warn "$KMODDIR/$kmod.ko was not placed by this install or changed since; left in place"
 		fi
 	done
 	kldxref "$KMODDIR"
 
 	# Restore only copies saved from the tree's current source version;
 	# copies from an older version would downgrade the upgraded tree.
-	# A file that no longer holds what the install wrote was updated or
+	# A file that does not hold what the install wrote was never copied (a
+	# failed install) or was updated or
 	# edited since, so it is left alone.
 	if [ -z "$src_ver" ]; then
 		warn "cannot read the source version in $SRCDIR; its source files are left as they are"
@@ -415,12 +463,12 @@ do_uninstall() {
 				mkdir -p "$aside/src/$(dirname "$f")"
 				mv "$SRCDIR/$f" "$aside/src/$f"
 			elif [ -e "$SRCDIR/$f" ]; then
-				warn "$SRCDIR/$f changed since the install; left in place"
+				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
 			fi
 		done
 		for f in $REPLACED_FILES; do
 			if ! installed_unchanged "$f"; then
-				warn "$SRCDIR/$f changed since the install; left in place"
+				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
 			elif [ -e "$saved/$f" ]; then
 				mkdir -p "$aside/src/$(dirname "$f")"
 				mv "$SRCDIR/$f" "$aside/src/$f"
@@ -431,9 +479,11 @@ do_uninstall() {
 		done
 		mv "$MANIFEST" "$aside/"
 	fi
-	if [ -e "$BUILD_INFO" ]; then
-		mv "$BUILD_INFO" "$aside/"
-	fi
+	for state in "$BUILD_INFO" "$MODULES_MANIFEST" "$STATUS"; do
+		if [ -e "$state" ]; then
+			mv "$state" "$aside/"
+		fi
+	done
 	mv "$STATE_DIR/srcdir" "$aside/"
 
 	echo ""
@@ -485,6 +535,7 @@ if [ "$DO_WIFI" -eq 1 ]; then
 
 	# --- Save the upstream files about to be overwritten ---
 	save_replaced_files
+	begin_install
 
 	# --- Copy new driver files ---
 	info "Copying driver source files"
@@ -527,21 +578,13 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	info "Installing WiFi kernel modules into $KMODDIR"
 	make -C "$SRCDIR/sys/modules/rtwn_pci" install KMODDIR="$KMODDIR"
 	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install KMODDIR="$KMODDIR"
+	record_modules
 	write_build_info
 
 	# --- Boot configuration ---
-	# Without the _name settings the loader picks the stock module.
 	info "Configuring $LOADER_CONF to load the modules from $KMODDIR"
-	if [ -f "$LOADER_CONF" ] && [ ! -f "$LOADER_CONF_SAVED" ]; then
-		cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED"
-	fi
-	loader_conf_set rtwn-rtl8821aefw_load "YES"
-	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
-	loader_conf_set if_rtwn_pci_load "YES"
-	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
-
-	# Everything --uninstall undoes is in place now.
-	write_install_record
+	configure_loader
+	finish_install
 
 	# --- Load ---
 	# Reloading the driver takes down every wlan interface on it, which
