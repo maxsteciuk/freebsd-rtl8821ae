@@ -239,12 +239,13 @@ save_replaced_files() {
 	done
 }
 
-# Start an install transaction, before the first change.  Snapshot
-# loader.conf, unless an install is already recorded (its snapshot holds
-# the state from before it), moving an older snapshot aside.  Record the
-# checksums of the source files about to be copied, the target tree, and
-# that the install is pending.  A failed install can then be undone with
-# --uninstall, which only touches files that hold what this install wrote.
+# Start an install transaction, before the first change.  For a fresh
+# install, snapshot loader.conf (moving an older snapshot aside) and start
+# an empty list of written source files; a reinstall keeps the snapshot
+# and entries of the install already recorded until they are replaced.
+# Record the target tree and that the install is pending.  Source files
+# and modules are recorded as each is written, so a failed install can be
+# undone with --uninstall, which only touches files this install wrote.
 begin_install() {
 	mkdir -p "$STATE_DIR"
 	if [ ! -e "$STATE_DIR/srcdir" ]; then
@@ -254,23 +255,38 @@ begin_install() {
 		if [ -f "$LOADER_CONF" ]; then
 			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED"
 		fi
+		if [ -e "$MANIFEST" ]; then
+			mv "$MANIFEST" "$MANIFEST.$(date +%Y%m%d-%H%M%S)"
+		fi
+		: > "$MANIFEST"
 	fi
-	for f in $REPLACED_FILES $ADDED_FILES; do
-		echo "$f $(sha256 -q "$REPODIR/$f")"
-	done > "$MANIFEST"
 	echo "pending" > "$STATUS"
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
 }
 
-# Record the checksum of module $1 right after it is installed, keeping
-# the entries of modules not yet replaced, so --uninstall moves every
-# module this install placed, and only those, even if a later step fails.
-record_module() {
+# Set entry $2 of checksum list $1 to the checksum of file $3, keeping the
+# other entries.
+record_entry() {
 	{
-		awk -v k="$1" '$1 != k' "$MODULES_MANIFEST" 2>/dev/null || true
-		echo "$1 $(sha256 -q "$KMODDIR/$1.ko")"
-	} > "$MODULES_MANIFEST.new"
-	mv "$MODULES_MANIFEST.new" "$MODULES_MANIFEST"
+		awk -v k="$2" '$1 != k' "$1" 2>/dev/null || true
+		echo "$2 $(sha256 -q "$3")"
+	} > "$1.new"
+	mv "$1.new" "$1"
+}
+
+# Copy source file $1 from the repository into the tree and record it
+# right away, keeping the entries of files not yet replaced, so
+# --uninstall touches every file this install wrote, and only those, even
+# if a later step fails.
+install_source_file() {
+	mkdir -p "$SRCDIR/$(dirname "$1")"
+	cp "$REPODIR/$1" "$SRCDIR/$1"
+	record_entry "$MANIFEST" "$1" "$SRCDIR/$1"
+}
+
+# Record module $1 right after it is installed, likewise.
+record_module() {
+	record_entry "$MODULES_MANIFEST" "$1" "$KMODDIR/$1.ko"
 }
 
 finish_install() {
@@ -354,10 +370,19 @@ do_check() {
 		echo "  PROBLEM: cannot tell whether the modules match the kernel; rerun install.sh"
 		problems=$((problems + 1))
 	fi
-	if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then
+	status="$(cat "$STATUS" 2>/dev/null || true)"
+	case "$status" in
+	complete)
+		;;
+	pending)
 		echo "  PROBLEM: an install did not complete; rerun install.sh or run --uninstall"
 		problems=$((problems + 1))
-	fi
+		;;
+	*)
+		echo "  PROBLEM: no completed install is recorded; rerun install.sh"
+		problems=$((problems + 1))
+		;;
+	esac
 
 	card="$(rtwn_card)"
 	case "$card" in
@@ -384,6 +409,12 @@ do_check() {
 			problems=$((problems + 1))
 		else
 			echo "  $kmod: not loaded"
+			problems=$((problems + 1))
+		fi
+		# kldstat remembers the path a module was loaded from, even if the
+		# file was replaced or removed since; the next boot loads the file.
+		if ! module_unchanged "$kmod"; then
+			echo "  PROBLEM: $KMODDIR/$kmod.ko is missing or not the module this install placed"
 			problems=$((problems + 1))
 		fi
 	done
@@ -548,28 +579,24 @@ if [ "$DO_WIFI" -eq 1 ]; then
 
 	# --- Copy new driver files ---
 	info "Copying driver source files"
-	mkdir -p "$SRCDIR/sys/dev/rtwn/rtl8821a/pci"
-	cp "$REPODIR/sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c"  "$SRCDIR/sys/dev/rtwn/rtl8821a/pci/"
-	cp "$REPODIR/sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.h"  "$SRCDIR/sys/dev/rtwn/rtl8821a/pci/"
-	cp "$REPODIR/sys/dev/rtwn/rtl8821a/pci/r21a_pci_compat.c"  "$SRCDIR/sys/dev/rtwn/rtl8821a/pci/"
-	cp "$REPODIR/sys/dev/rtwn/rtl8821a/pci/r21ae_tx_desc.h"    "$SRCDIR/sys/dev/rtwn/rtl8821a/pci/"
+	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c
+	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.h
+	install_source_file sys/dev/rtwn/rtl8821a/pci/r21a_pci_compat.c
+	install_source_file sys/dev/rtwn/rtl8821a/pci/r21ae_tx_desc.h
 
 	# --- Copy modified PCI attach header ---
 	info "Updating rtwn_pci_attach.h (adds RTL8821AE/RTL8812AE device IDs)"
-	cp "$REPODIR/sys/dev/rtwn/pci/rtwn_pci_attach.h" "$SRCDIR/sys/dev/rtwn/pci/"
+	install_source_file sys/dev/rtwn/pci/rtwn_pci_attach.h
 
 	# --- Copy firmware ---
 	info "Installing WiFi firmware"
-	mkdir -p "$SRCDIR/sys/contrib/dev/rtwn"
-	cp "$REPODIR/sys/contrib/dev/rtwn/rtwn-rtl8821aefw.fw.uu" "$SRCDIR/sys/contrib/dev/rtwn/"
+	install_source_file sys/contrib/dev/rtwn/rtwn-rtl8821aefw.fw.uu
 
 	# --- Copy Makefiles ---
 	info "Updating Makefiles"
-	cp "$REPODIR/sys/modules/rtwn_pci/Makefile" "$SRCDIR/sys/modules/rtwn_pci/"
-
-	mkdir -p "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae"
-	cp "$REPODIR/sys/modules/rtwnfw/rtwnrtl8821ae/Makefile" "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae/"
-	cp "$REPODIR/sys/modules/rtwnfw/Makefile" "$SRCDIR/sys/modules/rtwnfw/"
+	install_source_file sys/modules/rtwn_pci/Makefile
+	install_source_file sys/modules/rtwnfw/rtwnrtl8821ae/Makefile
+	install_source_file sys/modules/rtwnfw/Makefile
 
 	# --- Build ---
 	info "Building if_rtwn_pci kernel module"
