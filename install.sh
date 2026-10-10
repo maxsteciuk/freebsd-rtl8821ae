@@ -128,19 +128,22 @@ if [ "$DO_WIFI" -eq 1 ]; then
 
 	# --- Load ---
 	# Load by path: "kldload if_rtwn_pci" would load the stock module.
+	# A module that is still loaded here could not be unloaded, so the new
+	# one only takes effect at the next boot.  Any other load failure would
+	# also happen at boot, so it stops the install.
 	info "Loading WiFi modules from $KMODDIR"
 	kldunload if_rtwn_pci 2>/dev/null || true
 	kldunload rtwn-rtl8821aefw 2>/dev/null || true
-	kldload "$KMODDIR/rtwn-rtl8821aefw.ko" 2>/dev/null || true
-	kldload "$KMODDIR/if_rtwn_pci.ko" 2>/dev/null || true
-
-	LOADED="$(kld_path if_rtwn_pci)"
-	if [ "$LOADED" = "$KMODDIR/if_rtwn_pci.ko" ]; then
-		info "if_rtwn_pci loaded from $LOADED"
-	else
-		echo "WARNING: if_rtwn_pci is loaded from '${LOADED:-nowhere}'," \
-		    "not $KMODDIR; reboot to use the new module" >&2
-	fi
+	for KMOD in rtwn-rtl8821aefw if_rtwn_pci; do
+		if kldstat -q -n "$KMOD"; then
+			echo "WARNING: $KMOD is still loaded from" \
+			    "'$(kld_path "$KMOD")'; reboot to use the new module" >&2
+		else
+			kldload "$KMODDIR/$KMOD.ko" ||
+			    die "cannot load $KMODDIR/$KMOD.ko (see dmesg)"
+			info "$KMOD loaded from $(kld_path "$KMOD")"
+		fi
+	done
 fi
 
 # ============================================================
