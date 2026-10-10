@@ -21,6 +21,10 @@
 
 set -e
 
+# The state files must stay readable for --check run as a normal user,
+# whatever umask root has; they stay writable only by root.
+umask 022
+
 # --- Parse options ---
 DO_WIFI=0
 DO_BT=0
@@ -99,6 +103,8 @@ BUILD_DIR="$STATE_DIR/build"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
 MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
 STATUS="$STATE_DIR/status"
+# Present when there was no loader.conf to snapshot at install time.
+LOADER_CONF_ABSENT="$STATE_DIR/loader-conf-absent"
 
 # Installs and uninstalls run under an exclusive lock on this file, so two
 # of them cannot interleave their changes to the state, loader.conf and
@@ -341,14 +347,20 @@ find_view_interfaces() {
 # and only touches modules this installer placed.
 begin_install() {
 	mkdir -p "$STATE_DIR"
+	chmod 755 "$STATE_DIR"
 	if [ ! -e "$STATE_DIR/srcdir" ]; then
-		# Stage the new snapshot before moving the old one aside.
+		# Stage the new snapshot before moving the old one aside.  With
+		# no loader.conf, record that instead, so --uninstall can tell
+		# "there was nothing" from a lost snapshot.
 		if [ -f "$LOADER_CONF" ]; then
 			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED.rtl8821ae-new"
 		fi
 		move_aside "$LOADER_CONF_SAVED"
+		move_aside "$LOADER_CONF_ABSENT"
 		if [ -f "$LOADER_CONF" ]; then
 			mv "$LOADER_CONF_SAVED.rtl8821ae-new" "$LOADER_CONF_SAVED"
+		else
+			write_state "$LOADER_CONF_ABSENT" "no $LOADER_CONF before the install"
 		fi
 		move_aside "$MODULES_MANIFEST"
 		move_aside "$MODULES_SAVED_DIR"
@@ -478,6 +490,10 @@ do_check() {
 				problems=$((problems + 1))
 			fi
 		done
+		if [ ! -r "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
+			echo "  PROBLEM: the loader.conf snapshot $LOADER_CONF_SAVED is missing; --uninstall cannot restore the module settings"
+			problems=$((problems + 1))
+		fi
 		;;
 	pending)
 		echo "  PROBLEM: an install did not complete; rerun install.sh or run --uninstall"
@@ -564,6 +580,15 @@ do_uninstall() {
 	# is no telling which settings and modules are ours.
 	[ -r "$STATE_DIR/srcdir" ] ||
 	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
+	# Everything the restore relies on must be there before anything
+	# changes; otherwise refuse, so the state survives for a later retry.
+	if [ ! -r "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
+		die "the loader.conf snapshot $LOADER_CONF_SAVED is missing or unreadable, so the module settings cannot be restored; nothing changed"
+	fi
+	if [ "$(cat "$STATUS" 2>/dev/null || true)" = "complete" ] &&
+	    [ ! -s "$MODULES_MANIFEST" ]; then
+		die "the record of installed modules $MODULES_MANIFEST is missing or empty, so they cannot be told apart from other modules; nothing changed"
+	fi
 	require_root
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
@@ -605,7 +630,7 @@ do_uninstall() {
 	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
 	for state in "$MODULES_SAVED_DIR" "$BUILD_DIR" "$BUILD_INFO" \
-	    "$MODULES_MANIFEST" "$STATUS"; do
+	    "$MODULES_MANIFEST" "$LOADER_CONF_ABSENT" "$STATUS"; do
 		if [ -e "$state" ]; then
 			mv "$state" "$aside/"
 		fi
@@ -655,6 +680,7 @@ fi
 require_root
 if [ -z "$RTL8821AE_INSTALL_LOCKED" ]; then
 	mkdir -p "$STATE_DIR"
+	chmod 755 "$STATE_DIR"
 	export RTL8821AE_INSTALL_LOCKED=1
 	exec lockf -k -t 0 "$LOCK_FILE" /bin/sh "$0" "$@"
 fi
