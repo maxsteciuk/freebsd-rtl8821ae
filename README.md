@@ -2,8 +2,8 @@
 
 FreeBSD support for Realtek RTL8821AE and RTL8812AE:
 
-- **802.11ac WiFi** — PCIe kernel driver extending the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current) framework
-- **Bluetooth 4.0** — setup automation for the [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4&manpath=freebsd-current) / [rtlbtfw(8)](https://man.freebsd.org/cgi/man.cgi?query=rtlbtfw&sektion=8&manpath=freebsd-current) stack
+- **802.11ac WiFi** — PCIe kernel driver extending the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) framework
+- **Bluetooth 4.0** — setup automation for the [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4) / [rtlbtfw(8)](https://man.freebsd.org/cgi/man.cgi?query=rtlbtfw&sektion=8) stack
   (RTL8821AE only; RTL8812AE is WiFi-only)
 
 ## Supported Devices
@@ -14,7 +14,7 @@ The RTL8812AE is WiFi-only (2x2 MIMO, no Bluetooth).
 
 ### WiFi — PCIe Device IDs
 
-The [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current) driver matches on the primary PCI vendor/device ID (subsystem
+The [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) driver matches on the primary PCI vendor/device ID (subsystem
 IDs are not checked, so all OEM cards with these chips are supported):
 
 | Vendor ID | Device ID | Chipset     | Streams | Bluetooth |
@@ -46,7 +46,7 @@ These cards have been reported working or are expected to work:
 ### Bluetooth — USB Device IDs
 
 The Bluetooth controller on RTL8821AE combo modules appears as a separate USB
-device. FreeBSD's `ng_ubt_rtl(4)` driver handles firmware loading; [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4&manpath=freebsd-current)
+device. FreeBSD's [ng_ubt_rtl(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt_rtl&sektion=4) driver handles firmware loading; [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4)
 provides the Bluetooth HCI transport. The following USB device IDs are
 registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 
@@ -58,13 +58,13 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 | 0x13d3     | 0x3461      | IMC Networks/AzureWave |                        |
 | 0x13d3     | 0x3462      | IMC Networks/AzureWave | Verified on this repo  |
 
-> **Note:** `ng_ubt_rtl(4)` also has a generic Realtek Bluetooth class match.
+> **Note:** [ng_ubt_rtl(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt_rtl&sektion=4) also has a generic Realtek Bluetooth class match.
 > Realtek BT USB devices not in the table above may still be detected
 > automatically via USB class/subclass/protocol matching.
 
 ## Features
 
-### WiFi (PCIe — [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4&manpath=freebsd-current))
+### WiFi (PCIe — [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4))
 
 - 802.11ac (VHT) with 80 MHz channel width
 - 2.4 GHz and 5 GHz dual-band
@@ -75,7 +75,7 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 - Firmware-assisted operation
 - Power management
 
-### Bluetooth 4.0 (USB — [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4&manpath=freebsd-current))
+### Bluetooth 4.0 (USB — [ng_ubt(4)](https://man.freebsd.org/cgi/man.cgi?query=ng_ubt&sektion=4))
 
 - Bluetooth Core Specification v4.0
 - Dual mode: BR/EDR + Low Energy (BLE)
@@ -91,12 +91,12 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 
 ### Other FreeBSD versions
 
-The driver plugs into the `rtwn(4)` driver of the source tree it is built
+The driver plugs into the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) driver of the source tree it is built
 from, and that driver's internal interface changes between releases:
 
-- **14.x**: not supported. Its `rtwn(4)` lacks driver hooks this code sets,
+- **14.x**: not supported. Its [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) lacks driver hooks this code sets,
   so the module does not compile.
-- **16.0-CURRENT (main)**: not supported yet. Its `rtwn(4)` has a new driver
+- **16.0-CURRENT (main)**: not supported yet. Its [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) has a new driver
   hook this code does not set; the module would build but crash while
   attaching the card.
 
