@@ -131,6 +131,11 @@ sudo sh install.sh --all
 sudo sh install.sh --bluetooth
 ```
 
+The WiFi install puts the patched modules in `/boot/modules` and sets
+`/boot/loader.conf` to load them from there (see step 6 of the manual
+install). The original `loader.conf` is kept as
+`/boot/loader.conf.pre-rtl8821ae`.
+
 ## Manual Install
 
 ### 1. Copy driver source files
@@ -177,12 +182,16 @@ make -C sys/modules/rtwnfw/rtwnrtl8821ae clean all
 sudo make -C sys/modules/rtwnfw/rtwnrtl8821ae install
 ```
 
+`make install` puts both modules in `/boot/modules`. The stock
+`if_rtwn_pci.ko`, which has no RTL8821AE support, stays in `/boot/kernel`.
+
 ### 5. Load and test
 
 ```sh
-# Load modules
-sudo kldload rtwn-rtl8821aefw
-sudo kldload if_rtwn_pci
+# Load modules by path; "kldload if_rtwn_pci" would load the stock
+# module from /boot/kernel, which is searched first
+sudo kldload /boot/modules/rtwn-rtl8821aefw.ko
+sudo kldload /boot/modules/if_rtwn_pci.ko
 
 # Create wireless interface
 sudo ifconfig wlan0 create wlandev rtwn0
@@ -196,7 +205,19 @@ Add to `/boot/loader.conf`:
 
 ```
 rtwn-rtl8821aefw_load="YES"
+rtwn-rtl8821aefw_name="/boot/modules/rtwn-rtl8821aefw.ko"
 if_rtwn_pci_load="YES"
+if_rtwn_pci_name="/boot/modules/if_rtwn_pci.ko"
+```
+
+The `_name` lines are required: the loader searches `/boot/kernel` before
+`/boot/modules`, so with `_load` alone it loads the stock `if_rtwn_pci.ko`
+and the card stays unattached (`none@pci...` in `pciconf -l`).
+
+Check which file was loaded after a reboot:
+
+```sh
+kldstat -v -n if_rtwn_pci | head -2
 ```
 
 ## Integrating with Future FreeBSD Releases
