@@ -120,10 +120,30 @@ require_root() {
 	[ "$(id -u)" -eq 0 ] || die "Must run as root (or with sudo)"
 }
 
+# Copy file $1 to $2 through a staged copy beside $2 and a rename, so $2
+# never holds a partly written file.
+copy_staged() {
+	cp -p "$1" "$2.rtl8821ae-new"
+	mv "$2.rtl8821ae-new" "$2"
+}
+
+# Write $2 to state file $1 through a temporary file and a rename, so the
+# file always holds either its old or its new content.
+write_state() {
+	printf '%s\n' "$2" > "$1.new"
+	mv "$1.new" "$1"
+}
+
+# loader.conf lines are read as the loader reads them (stand/lua/config.lua):
+# optional space around "=", and a value that is either quoted or a single
+# word of letters, digits, "-", "_" and "."; anything after it, such as a
+# comment, is not part of the value.
+LOADER_WORD='[-[:alnum:]][-[:alnum:]_.]*'
+
 # Set $1="$2" in $LOADER_CONF, replacing any existing setting of $1.
 loader_conf_set() {
-	if grep -q "^[[:space:]]*$1=" "$LOADER_CONF" 2>/dev/null; then
-		sed -i '' "s|^[[:space:]]*$1=.*|$1=\"$2\"|" "$LOADER_CONF"
+	if grep -q "^[[:space:]]*$1[[:space:]]*=" "$LOADER_CONF" 2>/dev/null; then
+		sed -i '' "s|^[[:space:]]*$1[[:space:]]*=.*|$1=\"$2\"|" "$LOADER_CONF"
 	else
 		echo "$1=\"$2\"" >> "$LOADER_CONF"
 	fi
@@ -133,14 +153,16 @@ loader_conf_set() {
 # nothing to remove.
 loader_conf_unset() {
 	if [ -f "$LOADER_CONF" ]; then
-		sed -i '' "/^[[:space:]]*$1=/d" "$LOADER_CONF"
+		sed -i '' "/^[[:space:]]*$1[[:space:]]*=/d" "$LOADER_CONF"
 	fi
 }
 
 # Print the value of setting $1 in file $2 without quotes, or nothing.
 conf_value() {
-	sed -n "s/^[[:space:]]*$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}.*/\1/p" "$2" \
-	    2>/dev/null | tail -n 1
+	sed -n \
+	    -e "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+	    -e "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\($LOADER_WORD\).*/\1/p" \
+	    "$2" 2>/dev/null | tail -n 1
 }
 
 # Print the path a loaded kernel module file was loaded from.
@@ -246,14 +268,17 @@ save_replaced_files() {
 			fi
 			continue
 		fi
+		if [ -e "$saved/$f" ] && cmp -s "$saved/$f" "$SRCDIR/$f"; then
+			continue
+		fi
+		# Stage the new copy before moving the old one aside, so a
+		# failed copy never leaves a partial or missing saved file.
+		mkdir -p "$saved/$(dirname "$f")"
+		cp -p "$SRCDIR/$f" "$saved/$f.rtl8821ae-new"
 		if [ -e "$saved/$f" ]; then
-			if cmp -s "$saved/$f" "$SRCDIR/$f"; then
-				continue
-			fi
 			mv "$saved/$f" "$saved/$f.superseded-$(date +%Y%m%d-%H%M%S)"
 		fi
-		mkdir -p "$saved/$(dirname "$f")"
-		cp -p "$SRCDIR/$f" "$saved/$f"
+		mv "$saved/$f.rtl8821ae-new" "$saved/$f"
 	done
 }
 
@@ -267,11 +292,15 @@ save_replaced_files() {
 begin_install() {
 	mkdir -p "$STATE_DIR"
 	if [ ! -e "$STATE_DIR/srcdir" ]; then
+		# Stage the new snapshot before moving the old one aside.
+		if [ -f "$LOADER_CONF" ]; then
+			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED.rtl8821ae-new"
+		fi
 		if [ -e "$LOADER_CONF_SAVED" ]; then
 			mv "$LOADER_CONF_SAVED" "$LOADER_CONF_SAVED.$(date +%Y%m%d-%H%M%S)"
 		fi
 		if [ -f "$LOADER_CONF" ]; then
-			cp -p "$LOADER_CONF" "$LOADER_CONF_SAVED"
+			mv "$LOADER_CONF_SAVED.rtl8821ae-new" "$LOADER_CONF_SAVED"
 		fi
 		if [ -e "$MANIFEST" ]; then
 			mv "$MANIFEST" "$MANIFEST.$(date +%Y%m%d-%H%M%S)"
@@ -284,8 +313,8 @@ begin_install() {
 			mv "$MODULES_SAVED_DIR" "$MODULES_SAVED_DIR.$(date +%Y%m%d-%H%M%S)"
 		fi
 	fi
-	echo "pending" > "$STATUS"
-	echo "$SRCDIR" > "$STATE_DIR/srcdir"
+	write_state "$STATUS" "pending"
+	write_state "$STATE_DIR/srcdir" "$SRCDIR"
 }
 
 # Add the checksum of file $3 to the entries for $2 in checksum list $1.
@@ -320,7 +349,7 @@ save_existing_modules() {
 		if [ -e "$KMODDIR/$kmod.ko" ] && ! module_unchanged "$kmod" &&
 		    [ ! -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
 			mkdir -p "$MODULES_SAVED_DIR"
-			cp -p "$KMODDIR/$kmod.ko" "$MODULES_SAVED_DIR/$kmod.ko"
+			copy_staged "$KMODDIR/$kmod.ko" "$MODULES_SAVED_DIR/$kmod.ko"
 		fi
 	done
 }
@@ -338,7 +367,7 @@ install_module() {
 }
 
 finish_install() {
-	echo "complete" > "$STATUS"
+	write_state "$STATUS" "complete"
 }
 
 # Without the _name settings the loader picks the stock module.
@@ -368,7 +397,8 @@ write_build_info() {
 		echo "srcdir=\"$SRCDIR\""
 		echo "built=\"$(date '+%F %T')\""
 		echo "commit=\"$(git -C "$REPODIR" rev-parse --short HEAD 2>/dev/null || true)\""
-	} > "$BUILD_INFO"
+	} > "$BUILD_INFO.new"
+	mv "$BUILD_INFO.new" "$BUILD_INFO"
 }
 
 # A driver reload destroys the wlan interfaces on it.  devd recreates them
@@ -520,22 +550,34 @@ do_uninstall() {
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
 
+	# Put back the snapshot's own lines for each setting that differs from
+	# it, verbatim, so their quoting, spacing and comments come back exactly
+	# as they were; a setting that already matches is left untouched.
 	info "Restoring the module settings in $LOADER_CONF"
 	for key in $LOADER_KEYS; do
-		if grep -q "^[[:space:]]*$key=" "$LOADER_CONF_SAVED" 2>/dev/null; then
-			loader_conf_set "$key" "$(conf_value "$key" "$LOADER_CONF_SAVED")"
-		else
+		pattern="^[[:space:]]*$key[[:space:]]*="
+		current="$(grep "$pattern" "$LOADER_CONF" 2>/dev/null || true)"
+		before="$(grep "$pattern" "$LOADER_CONF_SAVED" 2>/dev/null || true)"
+		if [ "$current" != "$before" ]; then
 			loader_conf_unset "$key"
+			if [ -n "$before" ]; then
+				printf '%s\n' "$before" >> "$LOADER_CONF"
+			fi
 		fi
 	done
 
 	info "Moving the installed modules to $aside"
 	for kmod in $KMODS; do
 		if module_unchanged "$kmod"; then
-			mv "$KMODDIR/$kmod.ko" "$aside/"
 			if [ -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
-				cp -p "$MODULES_SAVED_DIR/$kmod.ko" "$KMODDIR/$kmod.ko"
+				# Copy ours aside, then swap the earlier module in
+				# through a staged copy: the path never goes missing,
+				# and a failed copy leaves ours in place for a retry.
+				cp -p "$KMODDIR/$kmod.ko" "$aside/"
+				copy_staged "$MODULES_SAVED_DIR/$kmod.ko" "$KMODDIR/$kmod.ko"
 				info "Put back the $kmod.ko that was there before the install"
+			else
+				mv "$KMODDIR/$kmod.ko" "$aside/"
 			fi
 		elif [ -e "$KMODDIR/$kmod.ko" ]; then
 			warn "$KMODDIR/$kmod.ko was not placed by this install or changed since; left in place"
@@ -571,9 +613,11 @@ do_uninstall() {
 			if ! installed_unchanged "$f"; then
 				warn "$SRCDIR/$f does not hold what this install wrote; left in place"
 			elif [ -e "$saved/$f" ]; then
+				# Same swap as for the modules: a failed copy leaves
+				# the tree as it was for a retry.
 				mkdir -p "$aside/src/$(dirname "$f")"
-				mv "$SRCDIR/$f" "$aside/src/$f"
-				cp -p "$saved/$f" "$SRCDIR/$f"
+				cp -p "$SRCDIR/$f" "$aside/src/$f"
+				copy_staged "$saved/$f" "$SRCDIR/$f"
 			else
 				warn "no saved upstream copy of $f for source version $src_ver; $SRCDIR/$f still holds the overlay version"
 			fi
@@ -637,6 +681,9 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	# --- Save the upstream files about to be overwritten ---
 	save_replaced_files
 	begin_install
+	# If anything below stops the install (a build error, for example),
+	# say what state it left and how to get out of it.
+	trap 'if [ "$(cat "$STATUS" 2>/dev/null)" = "pending" ]; then echo "ERROR: the install did not complete; what it changed so far is recorded: rerun install.sh, or undo it with: sh install.sh --uninstall" >&2; fi' EXIT
 
 	# --- Copy new driver files ---
 	info "Copying driver source files"
