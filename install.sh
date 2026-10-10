@@ -490,7 +490,9 @@ do_check() {
 				problems=$((problems + 1))
 			fi
 		done
-		if [ ! -r "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
+		# Existence only: the snapshot keeps loader.conf's own mode, which
+		# may be root-only; --uninstall checks that it can read it.
+		if [ ! -f "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
 			echo "  PROBLEM: the loader.conf snapshot $LOADER_CONF_SAVED is missing; --uninstall cannot restore the module settings"
 			problems=$((problems + 1))
 		fi
@@ -541,6 +543,29 @@ do_check() {
 	done
 
 	echo "  $LOADER_CONF:"
+	if [ -e "$LOADER_CONF" ] && [ ! -r "$LOADER_CONF" ]; then
+		echo "  PROBLEM: cannot read $LOADER_CONF as this user; run --check as root to check the module settings"
+		problems=$((problems + 1))
+	else
+		check_loader_settings
+	fi
+
+	for ifn in $(rtwn_wlans_up); do
+		echo "  $ifn: $(ifconfig "$ifn" | sed -n 's/^[[:space:]]*status: //p')"
+	done
+
+	echo ""
+	if [ "$problems" -eq 0 ]; then
+		echo "No problems found."
+		return 0
+	fi
+	echo "$problems problem(s) found."
+	return 1
+}
+
+# Report the module settings in $LOADER_CONF, counting each one that is
+# not what the install sets in problems.
+check_loader_settings() {
 	for key in $LOADER_KEYS; do
 		value="$(conf_value "$key" "$LOADER_CONF")"
 		echo "    $key=${value:-(not set)}"
@@ -557,18 +582,6 @@ do_check() {
 			problems=$((problems + 1))
 		fi
 	done
-
-	for ifn in $(rtwn_wlans_up); do
-		echo "  $ifn: $(ifconfig "$ifn" | sed -n 's/^[[:space:]]*status: //p')"
-	done
-
-	echo ""
-	if [ "$problems" -eq 0 ]; then
-		echo "No problems found."
-		return 0
-	fi
-	echo "$problems problem(s) found."
-	return 1
 }
 
 # ============================================================
@@ -585,10 +598,19 @@ do_uninstall() {
 	if [ ! -r "$LOADER_CONF_SAVED" ] && [ ! -e "$LOADER_CONF_ABSENT" ]; then
 		die "the loader.conf snapshot $LOADER_CONF_SAVED is missing or unreadable, so the module settings cannot be restored; nothing changed"
 	fi
-	if [ "$(cat "$STATUS" 2>/dev/null || true)" = "complete" ] &&
-	    [ ! -s "$MODULES_MANIFEST" ]; then
-		die "the record of installed modules $MODULES_MANIFEST is missing or empty, so they cannot be told apart from other modules; nothing changed"
-	fi
+	status="$(cat "$STATUS" 2>/dev/null || true)"
+	case "$status" in
+	complete)
+		if [ ! -s "$MODULES_MANIFEST" ]; then
+			die "the record of installed modules $MODULES_MANIFEST is missing or empty, so they cannot be told apart from other modules; nothing changed"
+		fi
+		;;
+	pending)
+		;;
+	*)
+		die "the install status in $STATUS is missing or not one this installer writes ('$status'), so what to undo is unknown; nothing changed"
+		;;
+	esac
 	require_root
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
