@@ -238,7 +238,9 @@ check_rtwn_hooks() {
 save_replaced_files() {
 	saved="$SRC_SAVED_DIR/$(src_version)"
 	for f in $REPLACED_FILES; do
-		if cmp -s "$REPODIR/$f" "$SRCDIR/$f"; then
+		# Ours: this repository's version, or any version this installer
+		# recorded (an older overlay, before the repository was updated).
+		if cmp -s "$REPODIR/$f" "$SRCDIR/$f" || installed_unchanged "$f"; then
 			if [ ! -e "$saved/$f" ]; then
 				warn "$SRCDIR/$f already holds the overlay version; no upstream copy saved"
 			fi
