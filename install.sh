@@ -67,6 +67,7 @@ LOADER_CONF_SAVED="$LOADER_CONF.pre-rtl8821ae"
 STATE_DIR="/var/db/rtl8821ae"
 BUILD_INFO="$STATE_DIR/build-info"
 SRC_SAVED_DIR="$STATE_DIR/src-orig"
+MANIFEST="$STATE_DIR/installed-files"
 
 # Modules in load order, and the loader.conf settings that select them.
 KMODS="rtwn-rtl8821aefw if_rtwn_pci"
@@ -173,6 +174,8 @@ check_src_version() {
 check_rtwn_hooks() {
 	rtwnvar="$SRCDIR/sys/dev/rtwn/if_rtwnvar.h"
 	ours="$REPODIR/sys/dev/rtwn/rtl8821a/pci/r21a_pci_attach.c"
+	[ -r "$ours" ] ||
+	    die "$ours not found; run install.sh from the repository it came with"
 	set_hooks="$(cat "$ours" "$SRCDIR/sys/dev/rtwn/pci/rtwn_pci_attach.c" \
 	    "$SRCDIR/sys/dev/rtwn/if_rtwn.c" |
 	    grep -o -E 'sc_[a-z0-9_]+[[:space:]]*=[^=]' |
@@ -226,7 +229,24 @@ save_replaced_files() {
 		mkdir -p "$saved/$(dirname "$f")"
 		cp -p "$SRCDIR/$f" "$saved/$f"
 	done
+}
+
+# Record a completed install: the checksum of every source file it placed
+# and, last, the source tree it went into, which marks the install as
+# complete.  --uninstall only undoes a recorded install and only touches
+# files that still hold what the install wrote.
+write_install_record() {
+	for f in $REPLACED_FILES $ADDED_FILES; do
+		echo "$f $(sha256 -q "$SRCDIR/$f")"
+	done > "$MANIFEST"
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
+}
+
+# Succeed if source file $1 still holds what the recorded install wrote.
+installed_unchanged() {
+	recorded="$(awk -v f="$1" '$1 == f { print $2 }' "$MANIFEST" 2>/dev/null)"
+	[ -n "$recorded" ] && [ -e "$SRCDIR/$1" ] &&
+	    [ "$(sha256 -q "$SRCDIR/$1")" = "$recorded" ]
 }
 
 write_build_info() {
@@ -381,19 +401,27 @@ do_uninstall() {
 
 	# Restore only copies saved from the tree's current source version;
 	# copies from an older version would downgrade the upgraded tree.
+	# A file that no longer holds what the install wrote was updated or
+	# edited since, so it is left alone.
 	if [ -z "$src_ver" ]; then
 		warn "cannot read the source version in $SRCDIR; its source files are left as they are"
+	elif [ ! -r "$MANIFEST" ]; then
+		warn "no record of the installed source files; $SRCDIR is left as it is"
 	else
 		saved="$SRC_SAVED_DIR/$src_ver"
 		info "Restoring the upstream source files in $SRCDIR"
 		for f in $ADDED_FILES; do
-			if [ -e "$SRCDIR/$f" ]; then
+			if installed_unchanged "$f"; then
 				mkdir -p "$aside/src/$(dirname "$f")"
 				mv "$SRCDIR/$f" "$aside/src/$f"
+			elif [ -e "$SRCDIR/$f" ]; then
+				warn "$SRCDIR/$f changed since the install; left in place"
 			fi
 		done
 		for f in $REPLACED_FILES; do
-			if [ -e "$saved/$f" ]; then
+			if ! installed_unchanged "$f"; then
+				warn "$SRCDIR/$f changed since the install; left in place"
+			elif [ -e "$saved/$f" ]; then
 				mkdir -p "$aside/src/$(dirname "$f")"
 				mv "$SRCDIR/$f" "$aside/src/$f"
 				cp -p "$saved/$f" "$SRCDIR/$f"
@@ -401,6 +429,7 @@ do_uninstall() {
 				warn "no saved upstream copy of $f for source version $src_ver; $SRCDIR/$f still holds the overlay version"
 			fi
 		done
+		mv "$MANIFEST" "$aside/"
 	fi
 	if [ -e "$BUILD_INFO" ]; then
 		mv "$BUILD_INFO" "$aside/"
@@ -429,6 +458,12 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	[ -d "$SRCDIR/sys/dev/rtwn" ] || die "FreeBSD source tree not found at $SRCDIR"
 	check_src_version
 	check_rtwn_hooks
+	# One recorded install at a time: installing into a second tree would
+	# lose the record needed to undo the first.
+	recorded_srcdir="$(cat "$STATE_DIR/srcdir" 2>/dev/null || true)"
+	if [ -n "$recorded_srcdir" ] && [ "$recorded_srcdir" != "$SRCDIR" ]; then
+		die "an install into $recorded_srcdir is recorded; run --uninstall before installing into $SRCDIR"
+	fi
 	if [ -z "$(rtwn_card)" ]; then
 		warn "no RTL8821AE/RTL8812AE card found; installing anyway"
 	fi
@@ -504,6 +539,9 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	loader_conf_set rtwn-rtl8821aefw_name "$KMODDIR/rtwn-rtl8821aefw.ko"
 	loader_conf_set if_rtwn_pci_load "YES"
 	loader_conf_set if_rtwn_pci_name "$KMODDIR/if_rtwn_pci.ko"
+
+	# Everything --uninstall undoes is in place now.
+	write_install_record
 
 	# --- Load ---
 	# Reloading the driver takes down every wlan interface on it, which
