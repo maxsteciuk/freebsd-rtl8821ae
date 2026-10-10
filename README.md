@@ -87,6 +87,22 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 ## Tested On
 
 - FreeBSD 15.0-RELEASE (version 1500068)
+- FreeBSD 15.1-RELEASE (user report, issue #3)
+
+### Other FreeBSD versions
+
+The driver plugs into the `rtwn(4)` driver of the source tree it is built
+from, and that driver's internal interface changes between releases:
+
+- **14.x**: not supported. Its `rtwn(4)` lacks driver hooks this code sets,
+  so the module does not compile.
+- **16.0-CURRENT (main)**: not supported yet. Its `rtwn(4)` has a new driver
+  hook this code does not set; the module would build but crash while
+  attaching the card.
+
+`install.sh` checks this before changing anything and refuses a source tree
+it cannot support. It also refuses a source tree whose version differs from
+the running kernel (`freebsd-version -k`).
 
 ## Repository Layout
 
@@ -134,7 +150,25 @@ sudo sh install.sh --bluetooth
 The WiFi install puts the patched modules in `/boot/modules` and sets
 `/boot/loader.conf` to load them from there (see step 6 of the manual
 install). The original `loader.conf` is kept as
-`/boot/loader.conf.pre-rtl8821ae`.
+`/boot/loader.conf.pre-rtl8821ae`, and the upstream source files it
+overwrites are saved under `/var/db/rtl8821ae`.
+
+If a wlan interface on the card is already up, the installer does not
+reload the driver, because that would drop the link (and cut off an ssh
+session running over it). It installs and asks for a reboot instead.
+`--reload` reloads anyway and then waits for the interface to come back
+and restores the default route from `rc.conf`.
+
+```sh
+# Report what is installed and loaded; no root needed
+sh install.sh --check
+
+# Undo the WiFi install (takes effect at the next boot)
+sudo sh install.sh --uninstall
+```
+
+Run `install.sh` again after every FreeBSD upgrade: the modules are built
+for one kernel version, and `--check` reports when the kernel has changed.
 
 ## Manual Install
 
