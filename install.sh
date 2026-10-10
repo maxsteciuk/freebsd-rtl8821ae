@@ -33,19 +33,34 @@ usage() {
 	echo "       sudo sh $0 --uninstall"
 }
 
+# --check and --uninstall are whole operations of their own: reject a
+# second one, and any install argument alongside them, rather than let the
+# order of the arguments decide what runs.
+MODE_ARG=""
+INSTALL_ARGS=""
 for arg in "$@"; do
 	case "$arg" in
-		--wifi)      DO_WIFI=1 ;;
-		--bluetooth) DO_BT=1 ;;
-		--all)       DO_WIFI=1; DO_BT=1 ;;
-		--reload)    DO_RELOAD=1 ;;
-		--check)     MODE="check" ;;
-		--uninstall) MODE="uninstall" ;;
+		--wifi)      DO_WIFI=1; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
+		--bluetooth) DO_BT=1; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
+		--all)       DO_WIFI=1; DO_BT=1; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
+		--reload)    DO_RELOAD=1; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
+		--check|--uninstall)
+			if [ -n "$MODE_ARG" ] && [ "$MODE_ARG" != "$arg" ]; then
+				echo "ERROR: $MODE_ARG and $arg cannot be combined" >&2
+				exit 2
+			fi
+			MODE_ARG="$arg"
+			MODE="${arg#--}"
+			;;
 		--help|-h)   usage; exit 0 ;;
 		-*)          usage >&2; exit 2 ;;
-		*)           SRCDIR="$arg" ;;
+		*)           SRCDIR="$arg"; INSTALL_ARGS="$INSTALL_ARGS $arg" ;;
 	esac
 done
+if [ -n "$MODE_ARG" ] && [ -n "$INSTALL_ARGS" ]; then
+	echo "ERROR: $MODE_ARG takes no other arguments (got:$INSTALL_ARGS)" >&2
+	exit 2
+fi
 
 # Default: WiFi only (backward compatible)
 if [ "$DO_WIFI" -eq 0 ] && [ "$DO_BT" -eq 0 ]; then
@@ -484,7 +499,8 @@ do_uninstall() {
 			warn "$KMODDIR/$kmod.ko was not placed by this install or changed since; left in place"
 		fi
 	done
-	kldxref "$KMODDIR"
+	# Best effort: a failure here must not leave the uninstall half done.
+	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
 	# Restore only copies saved from the tree's current source version;
 	# copies from an older version would downgrade the upgraded tree.
