@@ -134,19 +134,19 @@ rtwn_card() {
 	pciconf -l 2>/dev/null | grep -E "$PCI_MATCH" | head -n 1
 }
 
-# Print the wlan interfaces on the supported card that are up.
+# Print the PCI devices attached to rtwn(4).  Reloading if_rtwn_pci
+# detaches all of them, not only the RTL8821AE/RTL8812AE.
+rtwn_pci_devs() {
+	pciconf -l 2>/dev/null | sed -n 's/^\(rtwn[0-9][0-9]*\)@.*/\1/p'
+}
+
+# Print the wlan interfaces that are up on a PCI rtwn(4) device.
 rtwn_wlans_up() {
-	card_dev="$(rtwn_card | cut -d@ -f1)"
-	case "$card_dev" in
-	rtwn*)
-		;;
-	*)
-		return 0
-		;;
-	esac
+	devs="$(rtwn_pci_devs)"
 	for ifn in $(ifconfig -g wlan 2>/dev/null); do
-		if ifconfig "$ifn" 2>/dev/null |
-		    grep -q "parent interface: $card_dev\$" &&
+		parent="$(ifconfig "$ifn" 2>/dev/null |
+		    sed -n 's/^[[:space:]]*parent interface: //p')"
+		if [ -n "$parent" ] && echo "$devs" | grep -qx "$parent" &&
 		    ifconfig "$ifn" 2>/dev/null | grep -q '<UP'; then
 			echo "$ifn"
 		fi
@@ -200,20 +200,23 @@ check_rtwn_hooks() {
 	fi
 }
 
-# Save the upstream files the install overwrites, once, so --uninstall can
-# put them back.  A file that already matches ours was overwritten by an
-# earlier install, so its upstream version is unknown.
+# Save the upstream files the install overwrites, once per source version,
+# so --uninstall can put back the copies that match the tree it restores
+# into, even after the source tree was upgraded and reinstalled.  A file
+# that already matches ours was overwritten by an earlier install, so its
+# upstream version is unknown.
 save_replaced_files() {
+	saved="$SRC_SAVED_DIR/$(src_version)"
 	for f in $REPLACED_FILES; do
-		if [ -e "$SRC_SAVED_DIR/$f" ]; then
+		if [ -e "$saved/$f" ]; then
 			continue
 		fi
 		if cmp -s "$REPODIR/$f" "$SRCDIR/$f"; then
 			warn "$SRCDIR/$f already holds the overlay version; no upstream copy saved"
 			continue
 		fi
-		mkdir -p "$SRC_SAVED_DIR/$(dirname "$f")"
-		cp -p "$SRCDIR/$f" "$SRC_SAVED_DIR/$f"
+		mkdir -p "$saved/$(dirname "$f")"
+		cp -p "$SRCDIR/$f" "$saved/$f"
 	done
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
 }
@@ -270,6 +273,8 @@ do_check() {
 		fi
 	else
 		echo "  modules built for: unknown (no $BUILD_INFO)"
+		echo "  PROBLEM: cannot tell whether the modules match the kernel; rerun install.sh"
+		problems=$((problems + 1))
 	fi
 
 	card="$(rtwn_card)"
@@ -337,7 +342,12 @@ do_check() {
 # ============================================================
 
 do_uninstall() {
+	# Only undo an install this script recorded: without the record there
+	# is no telling which settings and files are ours.
+	[ -r "$STATE_DIR/srcdir" ] ||
+	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
 	require_root
+	SRCDIR="$(cat "$STATE_DIR/srcdir")"
 	aside="$STATE_DIR/uninstalled-$(date +%Y%m%d-%H%M%S)"
 	mkdir -p "$aside"
 
@@ -358,26 +368,29 @@ do_uninstall() {
 	done
 	kldxref "$KMODDIR"
 
-	srcdir="$(cat "$STATE_DIR/srcdir" 2>/dev/null || echo "$SRCDIR")"
-	info "Restoring the upstream source files in $srcdir"
+	# Restore only copies saved from the tree's current source version;
+	# copies from an older version would downgrade the upgraded tree.
+	saved="$SRC_SAVED_DIR/$(src_version)"
+	info "Restoring the upstream source files in $SRCDIR"
 	for f in $ADDED_FILES; do
-		if [ -e "$srcdir/$f" ]; then
+		if [ -e "$SRCDIR/$f" ]; then
 			mkdir -p "$aside/src/$(dirname "$f")"
-			mv "$srcdir/$f" "$aside/src/$f"
+			mv "$SRCDIR/$f" "$aside/src/$f"
 		fi
 	done
 	for f in $REPLACED_FILES; do
-		if [ -e "$SRC_SAVED_DIR/$f" ]; then
+		if [ -e "$saved/$f" ]; then
 			mkdir -p "$aside/src/$(dirname "$f")"
-			mv "$srcdir/$f" "$aside/src/$f"
-			cp -p "$SRC_SAVED_DIR/$f" "$srcdir/$f"
+			mv "$SRCDIR/$f" "$aside/src/$f"
+			cp -p "$saved/$f" "$SRCDIR/$f"
 		else
-			warn "no saved upstream copy of $f; $srcdir/$f still holds the overlay version"
+			warn "no saved upstream copy of $f for source version $(src_version); $SRCDIR/$f still holds the overlay version"
 		fi
 	done
 	if [ -e "$BUILD_INFO" ]; then
 		mv "$BUILD_INFO" "$aside/"
 	fi
+	mv "$STATE_DIR/srcdir" "$aside/"
 
 	echo ""
 	echo "Done.  Reboot to finish: the stock driver then loads and the"

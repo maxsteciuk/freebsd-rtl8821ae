@@ -163,7 +163,8 @@ and restores the default route from `rc.conf`.
 # Report what is installed and loaded; no root needed
 sh install.sh --check
 
-# Undo the WiFi install (takes effect at the next boot)
+# Undo the WiFi install (takes effect at the next boot); only works for an
+# install this script recorded in /var/db/rtl8821ae
 sudo sh install.sh --uninstall
 ```
 
