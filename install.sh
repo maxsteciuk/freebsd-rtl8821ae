@@ -357,6 +357,30 @@ find_view_interfaces() {
 	    die "found no *_if.m interface files under $BUILD_DIR/src/sys"
 }
 
+# Print the recorded install state: "none" when the installer has no
+# transaction state at all, "pending" or "complete" from the status file,
+# or "inconsistent" when state exists without a status this installer
+# writes.  The status, not any single record, decides whether an install
+# is recorded, so losing one record cannot make an active install look
+# like a fresh one and reset its rollback data.
+install_state() {
+	state="$(cat "$STATUS" 2>/dev/null || true)"
+	case "$state" in
+	pending|complete)
+		echo "$state"
+		return
+		;;
+	esac
+	for f in "$STATUS" "$STATE_DIR/srcdir" "$MODULES_MANIFEST" \
+	    "$MODULES_SAVED_LIST" "$MODULES_SAVED_DIR" "$LOADER_CONF_ABSENT"; do
+		if [ -e "$f" ]; then
+			echo "inconsistent"
+			return
+		fi
+	done
+	echo "none"
+}
+
 # Start an install transaction, before the first change to the system.
 # For a fresh install, snapshot loader.conf (moving an older snapshot
 # aside) and start new module records; a reinstall keeps the snapshot and
@@ -366,7 +390,7 @@ find_view_interfaces() {
 begin_install() {
 	mkdir -p "$STATE_DIR"
 	chmod 755 "$STATE_DIR"
-	if [ ! -e "$STATE_DIR/srcdir" ]; then
+	if [ "$(install_state)" = "none" ]; then
 		# Stage the new snapshot before moving the old one aside.  With
 		# no loader.conf, record that instead, so --uninstall can tell
 		# "there was nothing" from a lost snapshot.
@@ -395,7 +419,13 @@ begin_install() {
 record_entry() {
 	line="$2 $(sha256 -q "$3")"
 	if ! grep -qxF "$line" "$1" 2>/dev/null; then
-		echo "$line" >> "$1"
+		# Through a copy and a rename, so a short write never leaves a
+		# partial record.
+		{
+			cat "$1" 2>/dev/null || true
+			echo "$line"
+		} > "$1.new"
+		mv "$1.new" "$1"
 	fi
 }
 
@@ -409,19 +439,21 @@ modules_unrecorded() {
 	done
 }
 
-# Print the saved earlier modules that are missing or no longer match
-# their recorded checksum; putting them back would silently fail.  The
-# loop only prints, so it works whether or not the shell runs a
-# redirected loop in a subshell.
+# Print the saved earlier modules that cannot be trusted: listed but
+# missing, present but not listed, or not matching their listed checksum.
+# Putting such a module back would silently restore the wrong file.
 saved_modules_damaged() {
-	if [ -e "$MODULES_SAVED_LIST" ]; then
-		while read -r kmod sum; do
-			if [ ! -r "$MODULES_SAVED_DIR/$kmod.ko" ] ||
-			    [ "$(sha256 -q "$MODULES_SAVED_DIR/$kmod.ko")" != "$sum" ]; then
-				printf ' %s' "$kmod"
-			fi
-		done < "$MODULES_SAVED_LIST"
-	fi
+	for kmod in $KMODS; do
+		saved="$MODULES_SAVED_DIR/$kmod.ko"
+		listed="$(grep "^$kmod " "$MODULES_SAVED_LIST" 2>/dev/null || true)"
+		if [ ! -e "$saved" ] && [ -z "$listed" ]; then
+			continue
+		fi
+		if [ ! -r "$saved" ] || [ -z "$listed" ] ||
+		    ! grep -qxF "$kmod $(sha256 -q "$saved")" "$MODULES_SAVED_LIST"; then
+			printf ' %s' "$kmod"
+		fi
+	done
 }
 
 # Succeed if module $1 is still one this installer placed.
@@ -648,7 +680,7 @@ check_loader_settings() {
 do_uninstall() {
 	# Only undo an install this script recorded: without the record there
 	# is no telling which settings and modules are ours.
-	[ -r "$STATE_DIR/srcdir" ] ||
+	[ "$(install_state)" != "none" ] ||
 	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
 	# Everything the restore relies on must be there before anything
 	# changes; otherwise refuse, so the state survives for a later retry.
@@ -716,12 +748,12 @@ do_uninstall() {
 	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
 	for state in "$MODULES_SAVED_DIR" "$MODULES_SAVED_LIST" "$BUILD_DIR" \
-	    "$BUILD_INFO" "$MODULES_MANIFEST" "$LOADER_CONF_ABSENT" "$STATUS"; do
+	    "$BUILD_INFO" "$MODULES_MANIFEST" "$LOADER_CONF_ABSENT" \
+	    "$STATE_DIR/srcdir" "$STATUS"; do
 		if [ -e "$state" ]; then
 			mv "$state" "$aside/"
 		fi
 	done
-	mv "$STATE_DIR/srcdir" "$aside/"
 
 	echo ""
 	echo "Done.  Reboot to finish: the boot configuration and modules from"
@@ -735,7 +767,7 @@ check)
 	exit $?
 	;;
 uninstall)
-	[ -r "$STATE_DIR/srcdir" ] ||
+	[ "$(install_state)" != "none" ] ||
 	    die "no install by this script is recorded in $STATE_DIR; nothing changed"
 	require_root
 	if [ -z "$RTL8821AE_INSTALL_LOCKED" ]; then
@@ -752,6 +784,9 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	[ -d "$SRCDIR/sys/dev/rtwn" ] || die "FreeBSD source tree not found at $SRCDIR"
 	check_src_version
 	check_rtwn_hooks
+	if [ "$(install_state)" = "inconsistent" ]; then
+		die "the installer state in $STATE_DIR is inconsistent (records without a status this installer writes), so it is unclear what to keep for --uninstall; nothing changed"
+	fi
 	# One recorded install at a time: installing from a second tree would
 	# lose the record of which tree the installed modules came from.
 	recorded_srcdir="$(cat "$STATE_DIR/srcdir" 2>/dev/null || true)"
