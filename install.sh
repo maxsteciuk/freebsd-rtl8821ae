@@ -87,6 +87,7 @@ BUILD_INFO="$STATE_DIR/build-info"
 SRC_SAVED_DIR="$STATE_DIR/src-orig"
 MANIFEST="$STATE_DIR/installed-files"
 MODULES_MANIFEST="$STATE_DIR/installed-modules"
+MODULES_SAVED_DIR="$STATE_DIR/modules-orig"
 STATUS="$STATE_DIR/status"
 
 # Modules in load order, and the loader.conf settings that select them.
@@ -274,6 +275,9 @@ begin_install() {
 			mv "$MANIFEST" "$MANIFEST.$(date +%Y%m%d-%H%M%S)"
 		fi
 		: > "$MANIFEST"
+		if [ -e "$MODULES_SAVED_DIR" ]; then
+			mv "$MODULES_SAVED_DIR" "$MODULES_SAVED_DIR.$(date +%Y%m%d-%H%M%S)"
+		fi
 	fi
 	echo "pending" > "$STATUS"
 	echo "$SRCDIR" > "$STATE_DIR/srcdir"
@@ -289,14 +293,30 @@ record_entry() {
 	mv "$1.new" "$1"
 }
 
-# Copy source file $1 from the repository into the tree and record it
-# right away, keeping the entries of files not yet replaced, so
-# --uninstall touches every file this install wrote, and only those, even
-# if a later step fails.
+# Copy source file $1 from the repository into the tree, keeping the
+# entries of files not yet replaced, so --uninstall touches every file this
+# install wrote, and only those, even if a later step fails.  The copy is
+# staged beside the destination and recorded before it is renamed into
+# place, so a file is never changed under its real name before it is
+# recorded.
 install_source_file() {
 	mkdir -p "$SRCDIR/$(dirname "$1")"
-	cp "$REPODIR/$1" "$SRCDIR/$1"
-	record_entry "$MANIFEST" "$1" "$SRCDIR/$1"
+	cp "$REPODIR/$1" "$SRCDIR/$1.rtl8821ae-new"
+	record_entry "$MANIFEST" "$1" "$SRCDIR/$1.rtl8821ae-new"
+	mv "$SRCDIR/$1.rtl8821ae-new" "$SRCDIR/$1"
+}
+
+# Before the modules are installed, save any module file already in their
+# place that this install did not put there (an earlier manual install,
+# for example), so --uninstall can put it back.
+save_existing_modules() {
+	for kmod in $KMODS; do
+		if [ -e "$KMODDIR/$kmod.ko" ] && ! module_unchanged "$kmod" &&
+		    [ ! -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
+			mkdir -p "$MODULES_SAVED_DIR"
+			cp -p "$KMODDIR/$kmod.ko" "$MODULES_SAVED_DIR/$kmod.ko"
+		fi
+	done
 }
 
 # Record module $1 right after it is installed, likewise.
@@ -495,10 +515,17 @@ do_uninstall() {
 	for kmod in $KMODS; do
 		if module_unchanged "$kmod"; then
 			mv "$KMODDIR/$kmod.ko" "$aside/"
+			if [ -e "$MODULES_SAVED_DIR/$kmod.ko" ]; then
+				cp -p "$MODULES_SAVED_DIR/$kmod.ko" "$KMODDIR/$kmod.ko"
+				info "Put back the $kmod.ko that was there before the install"
+			fi
 		elif [ -e "$KMODDIR/$kmod.ko" ]; then
 			warn "$KMODDIR/$kmod.ko was not placed by this install or changed since; left in place"
 		fi
 	done
+	if [ -e "$MODULES_SAVED_DIR" ]; then
+		mv "$MODULES_SAVED_DIR" "$aside/"
+	fi
 	# Best effort: a failure here must not leave the uninstall half done.
 	kldxref "$KMODDIR" || warn "kldxref $KMODDIR failed; run it by hand"
 
@@ -543,8 +570,8 @@ do_uninstall() {
 	mv "$STATE_DIR/srcdir" "$aside/"
 
 	echo ""
-	echo "Done.  Reboot to finish: the stock driver then loads and the"
-	echo "RTL8821AE/RTL8812AE stays unattached.  The removed files are in"
+	echo "Done.  Reboot to finish: the boot configuration and modules from"
+	echo "before the install then apply.  The removed files are in"
 	echo "$aside."
 }
 
@@ -624,10 +651,11 @@ if [ "$DO_WIFI" -eq 1 ]; then
 	# --- Check the build before installing it ---
 	BUILT="$(make -C "$SRCDIR/sys/modules/rtwn_pci" -V .OBJDIR)/if_rtwn_pci.ko"
 	strings "$BUILT" | grep -q 'RTL8821AE' ||
-	    die "$BUILT has no RTL8821AE support; nothing was installed"
+	    die "$BUILT has no RTL8821AE support; no kernel modules were installed, but the source tree was changed: run 'sh install.sh --uninstall' to undo that"
 
 	# --- Install ---
 	info "Installing WiFi kernel modules into $KMODDIR"
+	save_existing_modules
 	make -C "$SRCDIR/sys/modules/rtwn_pci" install KMODDIR="$KMODDIR"
 	record_module if_rtwn_pci
 	make -C "$SRCDIR/sys/modules/rtwnfw/rtwnrtl8821ae" install KMODDIR="$KMODDIR"
