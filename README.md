@@ -87,18 +87,25 @@ registered in the FreeBSD kernel for RTL8821AE Bluetooth:
 ## Tested On
 
 - FreeBSD 15.0-RELEASE (version 1500068)
-- FreeBSD 15.1-RELEASE (user report, issue #3)
+- FreeBSD 15.1-RELEASE (version 1501000; also a user report, issue #3)
+- FreeBSD 16.0-CURRENT (version 1600027, snapshot of 2026-10-05)
+
+On 15.1 and 16.0-CURRENT, installing, reloading the driver without a reboot
+(`--reload`) and rebooting were each tested on an RTL8821AE card.
 
 ### Other FreeBSD versions
 
-The driver plugs into the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) driver of the source tree it is built
-from, and that driver's internal interface changes between releases:
+The driver plugs into the [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) driver of the FreeBSD source it is built
+from: rtwn(4) has a table of functions that each chip's driver fills in, and
+that table changes between FreeBSD versions:
 
-- **14.x**: not supported. Its [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) lacks driver hooks this code sets,
-  so the module does not compile.
-- **16.0-CURRENT (main)**: not supported yet. Its [rtwn(4)](https://man.freebsd.org/cgi/man.cgi?query=rtwn&sektion=4) has a new driver
-  hook this code does not set; the module would build but crash while
-  attaching the card.
+- **14.x**: not supported. Its table lacks functions this code fills in, so
+  the module does not compile.
+- **16.0-CURRENT (main)**: supported. CURRENT added a function,
+  `sc_efuse_preread`, that FreeBSD 15 does not have. The module build looks
+  for it in the FreeBSD source and fills it in only where it exists, so the
+  same code builds on 15.x and on CURRENT. CURRENT changes often, so a later
+  snapshot may need further changes; `install.sh` checks first (see below).
 
 `install.sh` checks this before changing anything and refuses a source tree
 it cannot support. It also refuses a source tree whose version differs from
