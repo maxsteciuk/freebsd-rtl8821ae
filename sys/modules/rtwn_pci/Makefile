@@ -44,4 +44,14 @@ opt_rtwn.h:
 	@echo "#define RTWN_WITHOUT_UCODE 1" >> ${.TARGET}
 .endif
 
+# FreeBSD 16 added a function slot, sc_efuse_preread, that every driver
+# must fill in; FreeBSD 15 does not have it.  When the FreeBSD source we
+# build against has it, define RTWN_HAVE_EFUSE_PREREAD so that
+# r21a_pci_attach.c fills it in.
+RTWN_HAS_EFUSE_PREREAD!= grep -q '(\*sc_efuse_preread)' \
+	${SYSDIR}/dev/rtwn/if_rtwnvar.h && echo yes || echo no
+.if ${RTWN_HAS_EFUSE_PREREAD} == "yes"
+CFLAGS+= -DRTWN_HAVE_EFUSE_PREREAD
+.endif
+
 .include <bsd.kmod.mk>

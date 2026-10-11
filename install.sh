@@ -285,8 +285,12 @@ check_rtwn_hooks() {
 		die "rtwn(4) in $SRCDIR has driver hooks this overlay does not set:$unset_hooks; the module would crash while attaching. This FreeBSD version is newer than the overlay supports (see README)."
 	fi
 
+	# Lines between "#ifdef RTWN_HAVE_..." and "#endif" are compiled only when
+	# the FreeBSD source has that slot (the module Makefile checks), so they
+	# are not slots the source must have.
 	unknown_members=""
-	for member in $(grep -o -E 'sc->sc_[a-z0-9_]+[[:space:]]*=[^=]' "$ours" |
+	for member in $(sed '/^#ifdef RTWN_HAVE_/,/^#endif/d' "$ours" |
+	    grep -o -E 'sc->sc_[a-z0-9_]+[[:space:]]*=[^=]' |
 	    grep -o -E 'sc_[a-z0-9_]+' | sort -u); do
 		if ! grep -qw "$member" "$rtwnvar"; then
 			unknown_members="$unknown_members $member"
