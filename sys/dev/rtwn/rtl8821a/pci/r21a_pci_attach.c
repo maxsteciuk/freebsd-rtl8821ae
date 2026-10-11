@@ -236,6 +236,9 @@ r21a_pci_attach(struct rtwn_pci_softc *pc)
 	sc->sc_rf_write			= r12a_rf_write;
 	sc->sc_check_condition		= r21a_check_condition;
 	sc->sc_efuse_postread		= rtwn_nop_softc;
+#ifdef RTWN_HAVE_EFUSE_PREREAD
+	sc->sc_efuse_preread		= rtwn_nop_int_softc;
+#endif
 	sc->sc_parse_rom		= r21a_parse_rom;
 	sc->sc_set_led			= r21a_set_led;
 	sc->sc_power_on			= r21a_power_on;
