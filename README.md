@@ -350,4 +350,7 @@ These critical bugs were found and fixed during development:
 
 ## License
 
+Realtek firmware (`sys/contrib/dev/rtwn`): Realtek's redistributable
+firmware license, see `sys/contrib/dev/rtwn/LICENSE`.
+
 BSD 2-Clause — see individual file headers for details.
